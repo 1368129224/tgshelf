@@ -325,6 +325,10 @@ func startBot(ctx context.Context, cfg *config.Config, logger *zap.Logger, st *s
 	// actually 1 hour" behaviour.
 	ttl := time.Duration(cfg.Download.CacheDialogsHours) * time.Hour
 
+	// Search result cache: built once outside the reconnect loop so a search confirmed right
+	// before a reconnect is still downloadable afterwards (results are in-memory only anyway).
+	searchStore := bot.NewSearchStore(0)
+
 	// Reconnect loop: gotd's Run returns an error as soon as pingLoop decides the connection
 	// is gone (observed as "task pingLoop: disconnect (pong missed)"). The old implementation
 	// treated that as fatal and exited the process, so a brief network hiccup took the bot
@@ -378,8 +382,13 @@ func startBot(ctx context.Context, cfg *config.Config, logger *zap.Logger, st *s
 		if nerr != nil {
 			return fmt.Errorf("build download orchestrator: %w", nerr)
 		}
+		searcher, serr := tg.NewSearcher(api, resolver)
+		if serr != nil {
+			return fmt.Errorf("build media searcher: %w", serr)
+		}
 
-		b.SetDownload(newBotDownloader(cfg, pipeline, runner, logger))
+		b.SetDownload(newBotDownloader(cfg, pipeline, runner, searchStore, logger))
+		b.SetSearchMedia(newBotSearcher(searcher), searchStore)
 		b.SetSync(func(c context.Context, full bool) (int, error) {
 			return resolver.SyncDialogs(c, full)
 		})

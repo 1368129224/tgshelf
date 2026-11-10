@@ -34,6 +34,7 @@ const (
 	helpText = "Usage: send one or more t.me message links to the bot, pick a tag and it downloads them.\n\n" +
 		"Commands:\n" +
 		"/help — show this help\n" +
+		"/search <channel> <keyword> — search a channel's photo/video messages and batch download them\n" +
 		"/status — show queued and running tasks\n" +
 		"/cancel [ID|all] — cancel tasks\n" +
 		"/show_config — show the current config (secrets masked)"
@@ -70,6 +71,8 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 		case "start", "help":
 			_, err := b.sendText(ctx, msg.Chat.ID, helpText)
 			return err
+		case "search":
+			return b.onSearchCommand(ctx, msg)
 		case "cancel":
 			// /cancel doubles as "leave the login wizard": while a wizard is running that wins,
 			// otherwise it falls through to task cancellation (admin.go's cmdCancel).

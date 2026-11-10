@@ -16,6 +16,8 @@ English | <a href="README_zh.md">简体中文</a>
 - **Fast** — 1 MiB chunks, `threads` in parallel per file, over a multi-DC connection pool.
 - **Resumable** — a chunk bitmap in `downloads/<tag>/.parts/` survives crashes, restarts and `/cancel`.
 - **Albums, private channels, discussion groups** — expanded and resolved transparently.
+- **Keyword search & batch download** — `/search @channel keyword` finds photo/video messages
+  server-side (no full-history scan), previews the hit count and total size, then downloads them all.
 - **Readable failures** — `FLOOD_WAIT`, `FILE_REFERENCE_EXPIRED`, `ENOSPC` … become Chinese explanations
   instead of raw codes.
 - **Live progress** — one edited message per task (bar, percentage, speed, ETA), at most one edit per 3 s.
@@ -74,6 +76,7 @@ docker compose up -d --build # update
 | Command | Who | What it does |
 |---|---|---|
 | `/start`, `/help` | allowed users | usage summary |
+| `/search <channel> <keyword>` | allowed users | search a channel's photo/video messages by keyword (server-side `messages.search`), preview the hit count and total size, then batch download via a tag |
 | `/status` | allowed users | queued and running tasks (admins see every task) |
 | `/cancel <id>` / `/cancel all` | allowed users | cancel a task; also exits an in-progress login wizard |
 | `/show_config` (alias `/config`) | allowed users | current configuration with secrets masked |

@@ -55,6 +55,12 @@ type Bot struct {
 	// logout is the /logout implementation; when nil, /logout only reports "not wired".
 	logout LogoutFunc
 
+	// searchMedia is the /search implementation (injected via SetSearchMedia); searchStore caches
+	// the media items of one search run behind a "search:<id>" link. When nil, /search reports
+	// "not wired".
+	searchMedia  SearchMediaFunc
+	searchStore  *SearchStore
+
 	// textHandlers / callbackHandlers are the dispatch entry points registered on the real poller
 	// in Run, or driven directly by a test fake.
 	textHandlers     []textHandlerFunc
