@@ -1,0 +1,79 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# tgshelf configuration template
+#   1) Copy it to the real config: cp tgshelf_config.toml.example tgshelf_config.toml
+#   2) At minimum set bot_token (get it from @BotFather)
+#   3) Field meanings and defaults: docs/configuration.md
+#
+# On first run, if tgshelf_config.toml does not exist, the program writes one from
+# its built-in template; this file is kept in sync with that template.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Debug mode (true enables verbose logging)
+debug = false
+
+# Telegram bot token (required, from @BotFather)
+bot_token = ""
+
+# Root download directory (required; the container's working directory is /, so ./downloads is /downloads)
+download_path = "./downloads"
+
+# Tag list = download subdirectories; may not contain /, \ or .. path traversal
+tags = ["video", "music", "doc"]
+
+# HTTP/SOCKS proxy URL, e.g. "socks5://127.0.0.1:1080"; leave empty to not use one
+proxy_url = ""
+
+[telegram]
+# Login identity: "tdesktop" (default) or "custom"
+#   tdesktop —— use the official Telegram Desktop app credentials (api_id 2040) and the
+#               TD device fingerprint (Desktop / Windows 10 / 4.2.4 x64);
+#               no api_id application of your own is needed.
+#   custom   —— use your own api_id / api_hash below; neutral defaults are used when the
+#               device fields are empty.
+identity = "tdesktop"
+# Telegram API ID (required when identity = "custom"; the TG_API_ID environment variable
+# also works; api_id and api_hash must be set together)
+api_id = 0
+# Telegram API Hash (the TG_API_HASH environment variable also works)
+api_hash = ""
+# Session file path (a relative path resolves against the config file's directory)
+session = "data/session.json"
+# Device fingerprint: empty = default by identity (tdesktop → TD fingerprint;
+# custom → tgshelf/<platform>/1.0). Setting any field overrides the default.
+device_model = ""
+system_version = ""
+app_version = ""
+# Language pack (usually empty; the tdesktop identity defaults to tdesktop)
+lang_pack = ""
+
+[bot]
+# Maximum concurrent downloads (1-16)
+max_concurrency = 3
+# User IDs allowed to use the bot; empty = no restriction (public deployment is not recommended)
+allowed_user_ids = []
+# Admin user IDs (may run /login /logout /sync)
+admin_user_ids = []
+
+[download]
+# Download threads per file (1-32)
+threads = 4
+# Concurrent files (>=1)
+file_concurrency = 2
+# Skip files that already exist with the same size
+skip_same = true
+# Correct the extension from the file header
+rewrite_ext = false
+# Download the description file
+desc = false
+# Use the takeout API
+takeout = false
+# Extension allowlist, e.g. [".mp4", ".mkv"]; empty = no restriction
+include = []
+# Extension blocklist
+exclude = []
+# Filename template
+template = '{{ .DialogID }}_{{ .MessageID }}_{{ filenamify .FileName }}'
+# Keep the .parts state file after success (failures always keep it)
+keep_parts = false
+# Dialog cache TTL in hours; 0 or negative = built-in default of 6 hours
+cache_dialogs_hours = 6

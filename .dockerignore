@@ -1,0 +1,19 @@
+# Git and version control
+.git/
+.gitignore
+
+# Go build output and local dependency cache
+.gohome/
+tgshelf
+
+# Data and runtime artifacts
+data/
+downloads/
+*.log
+*.tmp
+
+# Documentation and local backups
+docs/
+backup/
+.acceptance/
+.docker/

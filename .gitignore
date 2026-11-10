@@ -1,0 +1,41 @@
+# Binaries & build outputs
+/tgshelf
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.html
+
+# Go workspace & caches
+.gohome/
+
+# Runtime data & downloads
+data/
+downloads/
+download/
+.parts/
+*.log
+*.log.*
+
+# Local configs & credentials (NEVER commit)
+tgshelf_config.toml
+docker-compose.yml
+.env
+.docker/
+
+# Local scratch space (backups, ad-hoc test output)
+backup/
+.acceptance/
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

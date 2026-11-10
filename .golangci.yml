@@ -1,0 +1,26 @@
+# golangci-lint v2 configuration
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    rules:
+      # deps_check.go is the dependency anchor: it pins third-party versions through
+      # real symbol references, so its unused warnings are by design (see the file header
+      # comment). The whole file is excluded.
+      - path: "deps_check\\.go$"
+        linters:
+          - unused
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

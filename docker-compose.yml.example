@@ -1,0 +1,28 @@
+services:
+  tgshelf:
+    # Build locally by default (recommended: no dependency on a published image).
+    # Alternatively comment out build and enable the line below to use the image
+    # built by GitHub Actions:
+    # image: ghcr.io/1368129224/tgshelf:latest
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    container_name: tgshelf
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # Config file (read-only mount; edit the host file as needed)
+      - ./tgshelf_config.toml:/tgshelf_config.toml:ro
+      # Data directory (persists the session and task state)
+      - ./data:/data
+      # Download directory (finished files and .parts temp chunks)
+      - ./downloads:/downloads
+    # To reach a proxy listening on the host's 127.0.0.1, use host.docker.internal:
+    #   proxy_url = "socks5://host.docker.internal:1080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Permissions: the container runs as nonroot (uid:gid 65532:65532), so the host
+    # mount points must be writable by that uid. Run this before starting:
+    #   mkdir -p data downloads && chown -R 65532:65532 data downloads
