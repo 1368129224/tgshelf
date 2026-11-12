@@ -170,10 +170,12 @@ func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.Task
 			itemCopy := it
 			var refreshFn tg.RefreshFunc
 			if isSearchTask {
-				// A search task cannot re-resolve one t.me link, so file_reference refresh is
-				// unsupported: an expired reference fails that one item while the task carries on
-				// (search tasks start right away, so expiry is rare).
-				refreshFn = nil
+				// A search task has no single link to re-resolve: the item knows its dialog and
+				// message, so the message is fetched again to get a fresh file reference. Large
+				// batches run for hours and every reference in the batch expires meanwhile.
+				refreshFn = func(rctx context.Context) (gotdtg.InputFileLocationClass, error) {
+					return pipeline.RefreshItemLocation(rctx, itemCopy.DialogID, itemCopy.MessageID, mediaDocID(itemCopy))
+				}
 			} else {
 				refreshFn = func(rctx context.Context) (gotdtg.InputFileLocationClass, error) {
 					res, rerr := pipeline.ResolveLink(rctx, task.Link)

@@ -218,3 +218,35 @@ func (p *Pipeline) ResolveLink(ctx context.Context, raw string) (*Resolved, erro
 		Items:    items,
 	}, nil
 }
+
+// RefreshItemLocation re-fetches the message behind a media item and returns its current file
+// location. A file reference embedded in a location stops working after roughly half an hour, so a
+// batch that downloads for hours has to refresh each file when its reference expires; this is what
+// RefreshFunc implementations call.
+//
+// docID is the document id the caller expects; when it does not match, the message was edited into
+// a different file and the refresh reports ErrNoMedia instead of handing back a location for the
+// wrong content.
+func (p *Pipeline) RefreshItemLocation(ctx context.Context, dialogID int64, msgID int, docID int64) (tg.InputFileLocationClass, error) {
+	channelID, ok := ChannelIDFromPeerID(dialogID)
+	if !ok {
+		return nil, fmt.Errorf("tg: refresh message %d: dialog %d is not a channel: %w", msgID, dialogID, ErrChannelInaccessible)
+	}
+	peer, err := p.resolver.Resolve(ctx, MessageRef{Kind: RefPrivate, ChannelID: channelID})
+	if err != nil {
+		return nil, fmt.Errorf("tg: refresh message %d: resolve peer: %w", msgID, err)
+	}
+	msg, err := p.fetchMessage(ctx, peer, msgID)
+	if err != nil {
+		return nil, err
+	}
+	item, ok := MediaFromMessage(msg)
+	if !ok || item.Location == nil {
+		return nil, fmt.Errorf("tg: refresh message %d: media is gone: %w", msgID, ErrNoMedia)
+	}
+	if docID != 0 && docIDOf(item) != docID {
+		return nil, fmt.Errorf("tg: refresh message %d: media changed (want doc %d, got %d): %w",
+			msgID, docID, docIDOf(item), ErrNoMedia)
+	}
+	return item.Location, nil
+}
