@@ -398,3 +398,36 @@ func TestSearchMediaProgressCallback(t *testing.T) {
 		t.Fatalf("progress calls = %v, want [1 2]", counts)
 	}
 }
+
+func TestMessageLink(t *testing.T) {
+	cases := []struct {
+		name    string
+		ref     MessageRef
+		msgID   int
+		want    string
+		wantErr bool
+	}{
+		{"public", MessageRef{Kind: RefPublic, Username: "durov"}, 42, "https://t.me/durov/42", false},
+		{"private", MessageRef{Kind: RefPrivate, ChannelID: 1234567890}, 42, "https://t.me/c/1234567890/42", false},
+		{"bad_username", MessageRef{Kind: RefPublic, Username: "no pe"}, 42, "", true},
+		{"no_channel", MessageRef{Kind: RefPrivate}, 42, "", true},
+		{"zero_id", MessageRef{Kind: RefPublic, Username: "durov"}, 0, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := MessageLink(tc.ref, tc.msgID)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("MessageLink = %q, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MessageLink: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("MessageLink = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

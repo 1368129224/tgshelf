@@ -161,15 +161,91 @@ func (b *Bot) runSearch(ctx context.Context, chatID int64, placeholderID int, ch
 	shortID := b.links.Put(link)
 	kb, _ := buildTagKeyboard(b.cfg.Tags, shortID, 0)
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "🔍 Search done: %s for %q\n", channelArg, query)
-	fmt.Fprintf(&sb, "• Matched messages: %d\n", stats.MatchedMessages)
-	fmt.Fprintf(&sb, "• Media files: %d (%s)\n", stats.MediaCount, progress.HumanBytes(float64(stats.TotalBytes)))
+	size := progress.HumanBytes(float64(stats.TotalBytes))
+
+	var head strings.Builder
+	fmt.Fprintf(&head, "🔍 Search done: %s for %q\n", channelArg, query)
+	fmt.Fprintf(&head, "• Matched messages: %d\n", stats.MatchedMessages)
+	fmt.Fprintf(&head, "• Media files: %d\n", stats.MediaCount)
 	if stats.Truncated {
-		sb.WriteString("• Note: result was truncated (search cap reached)\n")
+		head.WriteString("• Note: the result was truncated (search cap reached)\n")
 	}
-	sb.WriteString("\nPick a tag to start the download:")
-	b.editText(ctx, chatID, placeholderID, sb.String(), kb)
+	head.WriteString("\nLinks:")
+
+	foot := fmt.Sprintf("Total size: %s\n\nPick a tag to start the download:", size)
+	b.sendSearchPages(ctx, chatID, placeholderID, splitSearchPages(head.String(), foot, searchLinks(channelArg, items)), kb)
+}
+
+// searchLinks builds one t.me link per distinct message that yielded media (album members share a
+// single target message, so they are collapsed). Unparseable channel arguments yield no links; the
+// panel then shows the statistics only.
+func searchLinks(channelArg string, items []tg.MediaItem) []string {
+	ref, err := tg.ParseChannelArg(channelArg)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(items))
+	links := make([]string, 0, len(items))
+	for _, it := range items {
+		if _, dup := seen[it.MessageID]; dup {
+			continue
+		}
+		seen[it.MessageID] = struct{}{}
+		l, lerr := tg.MessageLink(ref, it.MessageID)
+		if lerr != nil {
+			continue
+		}
+		links = append(links, l)
+	}
+	return links
+}
+
+// searchTextBudget is the character budget per message, kept well below Telegram's 4096 limit so
+// that emoji and the trailing footer never push a message over the edge.
+const searchTextBudget = 3500
+
+// splitSearchPages lays the header, the one-link-per-line list and the footer out over as many
+// messages as needed, each within searchTextBudget. The footer always ends the last page.
+func splitSearchPages(header, footer string, links []string) []string {
+	var pages []string
+	cur := header
+	for _, l := range links {
+		if len(cur)+1+len(l) > searchTextBudget && cur != header {
+			pages = append(pages, cur)
+			cur = l
+			continue
+		}
+		cur += "\n" + l
+	}
+	if len(cur)+2+len(footer) > searchTextBudget && cur != header {
+		pages = append(pages, cur)
+		cur = footer
+	} else {
+		cur += "\n\n" + footer
+	}
+	return append(pages, cur)
+}
+
+// sendSearchPages edits the placeholder into the first page and sends the remaining pages as new
+// messages; the tag keyboard rides on the last page only.
+func (b *Bot) sendSearchPages(ctx context.Context, chatID int64, placeholderID int, pages []string, kb *models.InlineKeyboardMarkup) {
+	for i, page := range pages {
+		var markup *models.InlineKeyboardMarkup
+		if i == len(pages)-1 {
+			markup = kb
+		}
+		if i == 0 {
+			b.editText(ctx, chatID, placeholderID, page, markup)
+			continue
+		}
+		params := &tgbot.SendMessageParams{ChatID: chatID, Text: page}
+		if markup != nil {
+			params.ReplyMarkup = markup
+		}
+		if _, err := b.api.SendMessage(ctx, params); err != nil {
+			b.logger.Warn("send search page failed", zap.Int("page", i+1), zap.Error(err))
+		}
+	}
 }
 
 // editText edits one message's text (and optionally its markup); edit failures are logged, they

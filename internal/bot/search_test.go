@@ -6,10 +6,12 @@ package bot
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"github.com/1368129224/tgshelf/internal/state"
@@ -83,10 +85,23 @@ func TestSearchConfirmationPanel(t *testing.T) {
 	if edit.MessageID != 1 {
 		t.Fatalf("edited message id = %d, want 1 (the placeholder)", edit.MessageID)
 	}
-	for _, want := range []string{"Search done", "@durov", `for "nice photos"`, "Matched messages: 2", "Media files: 2", "Pick a tag"} {
+	for _, want := range []string{
+		"Search done", "@durov", `for "nice photos"`,
+		"Matched messages: 2", "Media files: 2",
+		// One link per matched message, in the order the search returned them.
+		"https://t.me/durov/1", "https://t.me/durov/2",
+		// The size sits at the very end, before the prompt.
+		"Total size: ", "Pick a tag",
+	} {
 		if !strings.Contains(edit.Text, want) {
 			t.Fatalf("panel text %q is missing %q", edit.Text, want)
 		}
+	}
+	if !strings.HasSuffix(edit.Text, "Pick a tag to start the download:") {
+		t.Fatalf("panel must end with the pick-a-tag prompt, got %q", edit.Text)
+	}
+	if idx := strings.Index(edit.Text, "https://t.me/durov/1"); idx > strings.Index(edit.Text, "Total size: ") {
+		t.Fatal("the links must come before the total size")
 	}
 	// The panel must carry the shared tag keyboard.
 	if edit.ReplyMarkup == nil {
@@ -228,5 +243,102 @@ func TestSearchStoreLRU(t *testing.T) {
 	}
 	if _, ok := s.Get("c"); ok {
 		t.Fatal("entry c should have been evicted after the re-Put of b")
+	}
+}
+
+// TestSearchPanelListsLinksForPrivateChannel: a t.me/c/<id> argument yields t.me/c/<id>/<msgID>
+// links, and album members (same target message) are collapsed.
+func TestSearchPanelListsLinksForPrivateChannel(t *testing.T) {
+	b, api, _ := newTestBot(t)
+	items := []tg.MediaItem{
+		searchPhotoItem(501),
+		searchPhotoItem(502),
+		searchPhotoItem(502), // duplicate message id: listed once
+	}
+	b.SetSearchMedia(func(context.Context, string, string, func(int)) ([]tg.MediaItem, tg.SearchStats, error) {
+		return items, tg.SearchStats{MatchedMessages: 2, MediaCount: 3, TotalBytes: 3702}, nil
+	}, NewSearchStore(0))
+
+	msg := textMessage(1, 100, "/search t.me/c/1234567890 hello")
+	if err := b.handleText(context.Background(), msg); err != nil {
+		t.Fatalf("handleText: %v", err)
+	}
+	waitFor(t, "the confirmation panel", func() bool { return len(api.allEdits()) == 1 })
+	text := api.allEdits()[0].Text
+	if !strings.Contains(text, "https://t.me/c/1234567890/501") || !strings.Contains(text, "https://t.me/c/1234567890/502") {
+		t.Fatalf("panel text %q is missing the private-channel links", text)
+	}
+	if strings.Count(text, "https://t.me/c/1234567890/502") != 1 {
+		t.Fatalf("message 502 must be listed once, text = %q", text)
+	}
+}
+
+// TestSearchPanelSplitsLongLists: a long result must be laid out over several messages, each
+// within the budget, and only the last one carries the tag keyboard.
+func TestSearchPanelSplitsLongLists(t *testing.T) {
+	b, api, _ := newTestBot(t)
+	const n = 300
+	items := make([]tg.MediaItem, 0, n)
+	for i := 0; i < n; i++ {
+		items = append(items, searchPhotoItem(1000+i))
+	}
+	b.SetSearchMedia(func(context.Context, string, string, func(int)) ([]tg.MediaItem, tg.SearchStats, error) {
+		return items, tg.SearchStats{MatchedMessages: n, MediaCount: n, TotalBytes: int64(n) * 1000}, nil
+	}, NewSearchStore(0))
+
+	msg := textMessage(1, 100, "/search @durov hello")
+	if err := b.handleText(context.Background(), msg); err != nil {
+		t.Fatalf("handleText: %v", err)
+	}
+	// 300 links cannot fit in one message: expect the placeholder edit plus extra sends.
+	waitFor(t, "every page to be delivered", func() bool {
+		return len(api.allEdits()) == 1 && api.sentCount() >= 3
+	})
+
+	edits := api.allEdits()
+	if len(edits) != 1 {
+		t.Fatalf("placeholder edits = %d, want 1", len(edits))
+	}
+	if edits[0].ReplyMarkup != nil {
+		t.Fatal("the first page must not carry the keyboard")
+	}
+
+	api.mu.Lock()
+	sent := append([]*tgbot.SendMessageParams(nil), api.sent...)
+	api.mu.Unlock()
+
+	// Every page (the edited placeholder and the sent ones) must stay within the budget.
+	if got := len(edits[0].Text); got > searchTextBudget {
+		t.Fatalf("page 1 length = %d, want <= %d", got, searchTextBudget)
+	}
+	for i, s := range sent {
+		if len(s.Text) > searchTextBudget {
+			t.Fatalf("page %d length = %d, want <= %d", i+2, len(s.Text), searchTextBudget)
+		}
+	}
+	// Only the very last message carries the keyboard.
+	last := sent[len(sent)-1]
+	if last.ReplyMarkup == nil {
+		t.Fatal("the last page must carry the tag keyboard")
+	}
+	for i, s := range sent[:len(sent)-1] {
+		if s.ReplyMarkup != nil {
+			t.Fatalf("page %d carries a keyboard, only the last page may", i+2)
+		}
+	}
+	// The total size closes the list.
+	if !strings.Contains(last.Text, "Total size: ") {
+		t.Fatalf("last page %q is missing the total size", last.Text)
+	}
+	// Every link is present exactly once across all pages.
+	all := edits[0].Text
+	for _, s := range sent {
+		all += s.Text
+	}
+	for _, id := range []int{1000, 1001, 1299} {
+		want := "https://t.me/durov/" + strconv.Itoa(id)
+		if strings.Count(all, want+"\n")+strings.Count(all, want) == 0 {
+			t.Fatalf("link %s missing from the panel", want)
+		}
 	}
 }
