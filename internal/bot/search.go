@@ -173,25 +173,31 @@ func (b *Bot) runSearch(ctx context.Context, chatID int64, placeholderID int, ch
 	head.WriteString("\nLinks:")
 
 	foot := fmt.Sprintf("Total size: %s\n\nPick a tag to start the download:", size)
-	b.sendSearchPages(ctx, chatID, placeholderID, splitSearchPages(head.String(), foot, searchLinks(channelArg, items)), kb)
+	b.sendSearchPages(ctx, chatID, placeholderID, splitSearchPages(head.String(), foot, searchLinks(channelArg, stats, items)), kb)
 }
 
-// searchLinks builds one t.me link per distinct message that yielded media (album members share a
-// single target message, so they are collapsed). Unparseable channel arguments yield no links; the
-// panel then shows the statistics only.
-func searchLinks(channelArg string, items []tg.MediaItem) []string {
+// searchLinks builds one t.me link per matched message. Album members share a single message link,
+// so they are not listed one by one: the search layer reports the hit messages, and the items are
+// only used as a fallback (deduplicated by message id) when that list is unavailable.
+func searchLinks(channelArg string, stats tg.SearchStats, items []tg.MediaItem) []string {
 	ref, err := tg.ParseChannelArg(channelArg)
 	if err != nil {
 		return nil
 	}
-	seen := make(map[int]struct{}, len(items))
-	links := make([]string, 0, len(items))
-	for _, it := range items {
-		if _, dup := seen[it.MessageID]; dup {
-			continue
+	ids := stats.HitMessages
+	if len(ids) == 0 {
+		seen := make(map[int]struct{}, len(items))
+		for _, it := range items {
+			if _, dup := seen[it.MessageID]; dup {
+				continue
+			}
+			seen[it.MessageID] = struct{}{}
+			ids = append(ids, it.MessageID)
 		}
-		seen[it.MessageID] = struct{}{}
-		l, lerr := tg.MessageLink(ref, it.MessageID)
+	}
+	links := make([]string, 0, len(ids))
+	for _, id := range ids {
+		l, lerr := tg.MessageLink(ref, id)
 		if lerr != nil {
 			continue
 		}

@@ -159,6 +159,9 @@ func TestSearchMediaSinglePage(t *testing.T) {
 	if stats.Truncated {
 		t.Fatal("stats.Truncated = true, want false")
 	}
+	if len(stats.HitMessages) != 2 || stats.HitMessages[0] != 10 || stats.HitMessages[1] != 12 {
+		t.Fatalf("HitMessages = %v, want [10 12]", stats.HitMessages)
+	}
 	if rpc.searchCalls != 1 {
 		t.Fatalf("searchCalls = %d, want 1 (len(page) < limit stops paging)", rpc.searchCalls)
 	}
@@ -321,6 +324,10 @@ func TestSearchMediaAlbumExpansion(t *testing.T) {
 	}
 	if stats.MatchedMessages != 1 || stats.MediaCount != 3 {
 		t.Fatalf("stats = %+v, want 1 matched / 3 media", stats)
+	}
+	// The album is one hit message even though it expands to three media items.
+	if len(stats.HitMessages) != 1 || stats.HitMessages[0] != 200 {
+		t.Fatalf("HitMessages = %v, want [200]", stats.HitMessages)
 	}
 	seen := map[int]bool{}
 	for _, it := range items {

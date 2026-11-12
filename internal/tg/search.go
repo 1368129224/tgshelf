@@ -50,6 +50,10 @@ type SearchStats struct {
 	TotalBytes int64
 	// Truncated is true when the search stopped early because MaxCount was reached.
 	Truncated bool
+	// HitMessages holds the id of every message that matched the query and yielded media, in the
+	// order the server returned them (newest first). An album appears once: its members share one
+	// message link, so listing the members separately would only duplicate lines.
+	HitMessages []int
 }
 
 // SearchOptions configures one SearchMedia call.
@@ -259,6 +263,7 @@ func (s *Searcher) SearchMedia(ctx context.Context, opts SearchOptions, progress
 				}
 				if albumHasMedia {
 					stats.MatchedMessages++
+					stats.HitMessages = append(stats.HitMessages, msg.ID)
 					if progress != nil {
 						progress(stats.MediaCount)
 					}
@@ -274,6 +279,7 @@ func (s *Searcher) SearchMedia(ctx context.Context, opts SearchOptions, progress
 					stats.MediaCount++
 					stats.TotalBytes += it.Size
 					stats.MatchedMessages++
+					stats.HitMessages = append(stats.HitMessages, msg.ID)
 					if progress != nil {
 						progress(stats.MediaCount)
 					}

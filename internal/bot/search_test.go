@@ -72,7 +72,7 @@ func TestSearchConfirmationPanel(t *testing.T) {
 			t.Errorf("query = %q, want %q", query, "nice photos")
 		}
 		return []tg.MediaItem{searchPhotoItem(1), searchPhotoItem(2)},
-			tg.SearchStats{MatchedMessages: 2, MediaCount: 2, TotalBytes: 2468}, nil
+			tg.SearchStats{MatchedMessages: 2, MediaCount: 2, TotalBytes: 2468, HitMessages: []int{1, 2}}, nil
 	}, NewSearchStore(0))
 
 	msg := textMessage(1, 100, "/search @durov nice photos")
@@ -250,13 +250,17 @@ func TestSearchStoreLRU(t *testing.T) {
 // links, and album members (same target message) are collapsed.
 func TestSearchPanelListsLinksForPrivateChannel(t *testing.T) {
 	b, api, _ := newTestBot(t)
+	// Three album members (one hit) plus one plain message: exactly two links.
 	items := []tg.MediaItem{
 		searchPhotoItem(501),
 		searchPhotoItem(502),
-		searchPhotoItem(502), // duplicate message id: listed once
+		searchPhotoItem(503),
+		searchPhotoItem(600),
 	}
 	b.SetSearchMedia(func(context.Context, string, string, func(int)) ([]tg.MediaItem, tg.SearchStats, error) {
-		return items, tg.SearchStats{MatchedMessages: 2, MediaCount: 3, TotalBytes: 3702}, nil
+		return items, tg.SearchStats{
+			MatchedMessages: 2, MediaCount: 4, TotalBytes: 5000, HitMessages: []int{501, 600},
+		}, nil
 	}, NewSearchStore(0))
 
 	msg := textMessage(1, 100, "/search t.me/c/1234567890 hello")
@@ -265,11 +269,16 @@ func TestSearchPanelListsLinksForPrivateChannel(t *testing.T) {
 	}
 	waitFor(t, "the confirmation panel", func() bool { return len(api.allEdits()) == 1 })
 	text := api.allEdits()[0].Text
-	if !strings.Contains(text, "https://t.me/c/1234567890/501") || !strings.Contains(text, "https://t.me/c/1234567890/502") {
-		t.Fatalf("panel text %q is missing the private-channel links", text)
+	for _, want := range []string{"https://t.me/c/1234567890/501", "https://t.me/c/1234567890/600"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("panel text %q is missing the link %s", text, want)
+		}
 	}
-	if strings.Count(text, "https://t.me/c/1234567890/502") != 1 {
-		t.Fatalf("message 502 must be listed once, text = %q", text)
+	// Album siblings 502/503 must not be listed: one link per hit message.
+	for _, unwanted := range []string{"https://t.me/c/1234567890/502", "https://t.me/c/1234567890/503"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("album member link %s must not be listed, text = %q", unwanted, text)
+		}
 	}
 }
 
@@ -279,11 +288,13 @@ func TestSearchPanelSplitsLongLists(t *testing.T) {
 	b, api, _ := newTestBot(t)
 	const n = 300
 	items := make([]tg.MediaItem, 0, n)
+	hits := make([]int, 0, n)
 	for i := 0; i < n; i++ {
 		items = append(items, searchPhotoItem(1000+i))
+		hits = append(hits, 1000+i)
 	}
 	b.SetSearchMedia(func(context.Context, string, string, func(int)) ([]tg.MediaItem, tg.SearchStats, error) {
-		return items, tg.SearchStats{MatchedMessages: n, MediaCount: n, TotalBytes: int64(n) * 1000}, nil
+		return items, tg.SearchStats{MatchedMessages: n, MediaCount: n, TotalBytes: int64(n) * 1000, HitMessages: hits}, nil
 	}, NewSearchStore(0))
 
 	msg := textMessage(1, 100, "/search @durov hello")
