@@ -48,6 +48,19 @@ func newFloodWait(ctx context.Context) telegram.Middleware {
 	return floodWait{ctx: ctx}
 }
 
+type skipFloodWaitKey struct{}
+
+// withSkipFloodWait marks ctx so floodWait returns FLOOD_WAIT errors immediately to the caller
+// instead of sleeping and retrying (used by interactive login RPCs that surface *FloodWaitError).
+func withSkipFloodWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, skipFloodWaitKey{}, true)
+}
+
+func shouldSkipFloodWait(ctx context.Context) bool {
+	v, _ := ctx.Value(skipFloodWaitKey{}).(bool)
+	return v
+}
+
 func (f floodWait) Handle(next tg.Invoker) telegram.InvokeFunc {
 	return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
 		for {
@@ -57,7 +70,7 @@ func (f floodWait) Handle(next tg.Invoker) telegram.InvokeFunc {
 			}
 
 			wait, ok := tgerr.AsFloodWait(err)
-			if !ok {
+			if !ok || shouldSkipFloodWait(ctx) {
 				return err
 			}
 
