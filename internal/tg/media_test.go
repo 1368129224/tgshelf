@@ -212,6 +212,44 @@ func TestMediaKindsAndNames(t *testing.T) {
 		}
 	})
 
+	t.Run("audio_without_filename_uses_performer_and_title", func(t *testing.T) {
+		msg := mediaTestMessage(32, peer, mediaTestDocument(9202, "audio/mpeg", 8192,
+			&tg.DocumentAttributeAudio{Duration: 180, Performer: "Jay Chou", Title: "Nocturne"},
+		))
+		item, ok := MediaFromMessage(msg)
+		if !ok {
+			t.Fatalf("want ok=true")
+		}
+		if want := "Jay Chou - Nocturne.mp3"; item.Name != want {
+			t.Errorf("Name = %q, want %q", item.Name, want)
+		}
+	})
+
+	t.Run("audio_without_filename_title_or_performer_only", func(t *testing.T) {
+		msgTitle := mediaTestMessage(33, peer, mediaTestDocument(9203, "audio/flac", 8192,
+			&tg.DocumentAttributeAudio{Duration: 180, Title: "Untitled Track"},
+		))
+		if item, ok := MediaFromMessage(msgTitle); !ok || item.Name != "Untitled Track.flac" {
+			t.Errorf("title-only Name = %q (ok=%v), want %q", item.Name, ok, "Untitled Track.flac")
+		}
+
+		msgPerf := mediaTestMessage(34, peer, mediaTestDocument(9204, "audio/ogg", 8192,
+			&tg.DocumentAttributeAudio{Duration: 180, Performer: "Unknown Artist"},
+		))
+		if item, ok := MediaFromMessage(msgPerf); !ok || item.Name != "Unknown Artist.ogg" {
+			t.Errorf("performer-only Name = %q (ok=%v), want %q", item.Name, ok, "Unknown Artist.ogg")
+		}
+	})
+
+	t.Run("voice_ignores_title_and_performer", func(t *testing.T) {
+		msg := mediaTestMessage(35, peer, mediaTestDocument(9205, "audio/ogg", 512,
+			&tg.DocumentAttributeAudio{Duration: 5, Voice: true, Performer: "Alice", Title: "Memo"},
+		))
+		if item, ok := MediaFromMessage(msg); !ok || item.Name != "9205.ogg" {
+			t.Errorf("voice Name = %q (ok=%v), want %q", item.Name, ok, "9205.ogg")
+		}
+	})
+
 	t.Run("voice_flag_true", func(t *testing.T) {
 		msg := mediaTestMessage(40, peer, mediaTestDocument(9300, "audio/ogg", 512,
 			&tg.DocumentAttributeAudio{Duration: 5, Voice: true},

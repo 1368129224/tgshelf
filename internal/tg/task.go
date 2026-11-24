@@ -50,7 +50,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -352,7 +351,9 @@ func (r *TaskRunner) Run(ctx context.Context, taskID string, items []TaskItem, p
 
 				res := r.runItem(ctx, taskID, idx, items[idx], chunkDone)
 				res.Index = idx
-				res.RelPath = items[idx].RelPath
+				if res.RelPath == "" {
+					res.RelPath = items[idx].RelPath
+				}
 
 				errMu.Lock()
 				results[idx] = res
@@ -424,19 +425,6 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 	res.State = state.StateRunning
 
 	size := it.Item.Size
-	// skip_same: a file with the same name and size already exists -> skip, no getFile at all.
-	if r.cfg.SkipSame && size >= 0 && it.RelPath != "" {
-		final := filepath.Join(r.cfg.RootDir, filepath.FromSlash(it.RelPath))
-		if info, err := os.Stat(final); err == nil && info.Size() == size {
-			r.logger.Info("tg: skip_same hit, skipping download",
-				zap.String("task", taskID), zap.String("path", it.RelPath))
-			res.State = state.StateDone
-			res.Skipped = true
-			res.Bytes = size
-			return res
-		}
-	}
-
 	meta := state.ResumeMeta{
 		Size:      size,
 		ChunkSize: taskChunkSize,
@@ -449,22 +437,22 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		opts = append(opts, state.WithKeepState(true))
 	}
 
-	sess, err := state.Open(r.cfg.RootDir, it.RelPath, meta, opts...)
+	resolvedRel, skipped, sess, err := state.ResolveTarget(r.cfg.RootDir, it.RelPath, meta, r.cfg.SkipSame, opts...)
 	if err != nil {
 		res.Err = fmt.Errorf("tg: open resume session %q: %w", it.RelPath, err)
 		res.State = state.StateFailed
 		return res
 	}
-	defer func() { _ = sess.Close() }()
-
-	// Pre-emptive flush: flush once before downloading so that .state definitely exists on
-	// failure/cancellation (the Session writes .state only on Flush; if a chunk failure happens
-	// before the first Flush threshold, without this step there would be no resume state file).
-	if ferr := sess.Flush(); ferr != nil {
-		res.Err = fmt.Errorf("tg: pre-flush .state %q: %w", it.RelPath, ferr)
-		res.State = state.StateFailed
+	res.RelPath = resolvedRel
+	if skipped {
+		r.logger.Info("tg: skip_same hit, skipping download",
+			zap.String("task", taskID), zap.String("path", resolvedRel))
+		res.State = state.StateDone
+		res.Skipped = true
+		res.Bytes = size
 		return res
 	}
+	defer func() { _ = sess.Close() }()
 
 	// Bitmap wiring (constraint 8): build an independent copy from the Session bitmap snapshot and
 	// never hand sess.Done() directly to ChunkPlan (two locks protecting the same []byte would
@@ -552,7 +540,7 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 					return
 				}
 				if prevDone.CompareAndSwap(prev, done) {
-					chunkDone(done-prev, it.RelPath)
+					chunkDone(done-prev, resolvedRel)
 					return
 				}
 			}
@@ -615,7 +603,7 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		if aerr := sess.Abort(); aerr != nil {
 			r.logger.Warn("tg: Abort failed", zap.String("task", taskID), zap.Error(aerr))
 		}
-		res.Err = fmt.Errorf("tg: commit %q: %w", it.RelPath, err)
+		res.Err = fmt.Errorf("tg: commit %q: %w", resolvedRel, err)
 		res.State = state.StateFailed
 		return res
 	}

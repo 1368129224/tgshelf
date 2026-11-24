@@ -71,7 +71,7 @@ takeout = false
 include = []
 # Extension blocklist
 exclude = []
-# Filename template
+# Filename template (set '{{ filenamify .FileName }}' to keep original filenames; see docs/configuration.md)
 template = '{{ .DialogID }}_{{ .MessageID }}_{{ filenamify .FileName }}'
 # Keep the .parts state file after success (failures always keep it)
 keep_parts = false

@@ -122,6 +122,12 @@ Run `./tgshelf -h` for the full flag list (`-to`, `-tag`, `-threads`, `-file-con
 
 Every key, its default and its constraints: [docs/configuration.md](docs/configuration.md).
 
+**Custom filenames:** by default `[download] template` prefixes `<dialog_id>_<message_id>_` to the
+original filename. To keep the original filename as-is, set `template = '{{ filenamify .FileName }}'`
+(colliding files of different sizes are automatically saved as `name (1).ext`, audio without a
+filename falls back to `Performer - Title.ext`, and compressed Telegram photos use `<photo_id>.jpg`
+because Telegram strips their original filenames).
+
 ## Files on disk
 
 ```

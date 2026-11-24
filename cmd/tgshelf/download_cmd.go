@@ -685,27 +685,6 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 		return res
 	}
 	size := it.item.Size
-	final := filepath.Join(e.root, filepath.FromSlash(it.rel))
-	if abs, aerr := filepath.Abs(final); aerr == nil {
-		res.absPath = abs
-	} else {
-		res.absPath = final
-	}
-
-	// skip_same: when a final file with the same name and size already exists, skip it without
-	// a single getFile call.
-	if e.skipSame && size > 0 {
-		if info, err := os.Stat(final); err == nil && info.Size() == size {
-			res.skipped = true
-			res.size = size
-			res.bytes = size
-			if sum, merr := md5File(final); merr == nil {
-				res.md5 = sum
-			}
-			return res
-		}
-	}
-
 	meta := state.ResumeMeta{
 		Size:      size,
 		ChunkSize: e.chunk,
@@ -717,18 +696,28 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 	if e.keepParts {
 		opts = append(opts, state.WithKeepState(true))
 	}
-	sess, err := state.Open(e.root, it.rel, meta, opts...)
+	resolvedRel, skipped, sess, err := state.ResolveTarget(e.root, it.rel, meta, e.skipSame && size > 0, opts...)
 	if err != nil {
 		res.err = fmt.Errorf("open resume session: %w", err)
 		return res
 	}
-	defer func() { _ = sess.Close() }()
-
-	// Write .state early so a resumable state file exists even after a failure or a kill.
-	if err := sess.Flush(); err != nil {
-		res.err = fmt.Errorf("write .state early: %w", err)
+	res.relPath = resolvedRel
+	final := filepath.Join(e.root, filepath.FromSlash(resolvedRel))
+	if abs, aerr := filepath.Abs(final); aerr == nil {
+		res.absPath = abs
+	} else {
+		res.absPath = final
+	}
+	if skipped {
+		res.skipped = true
+		res.size = size
+		res.bytes = size
+		if sum, merr := md5File(final); merr == nil {
+			res.md5 = sum
+		}
 		return res
 	}
+	defer func() { _ = sess.Close() }()
 
 	// Bitmap wiring: Session bitmap snapshot -> independent copy (sess.Done() is never given to ChunkPlan).
 	planBM := state.NewBitmap(int(sess.ChunkCount()))
@@ -832,6 +821,8 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 		res.bytes = prevDone.Load()
 		return res
 	}
+	final = sess.FinalPath()
+	res.absPath = final
 	res.size = size
 	res.bytes = size
 	if sum, merr := md5File(final); merr == nil {

@@ -120,6 +120,8 @@ cp tgshelf_config.toml.example tgshelf_config.toml # 然后改 bot_token / admin
 
 每个配置项的含义、默认值与约束：[docs/configuration.md](docs/configuration.md)。
 
+**自定义文件名（保留原始文件名）**：`[download] template` 默认拼接 `<频道ID>_<消息ID>_<原文件名>`；若希望直接保留原始文件名，可在配置中设为 `template = '{{ filenamify .FileName }}'`（磁盘上遇到同名但大小不同的已有文件会自动避让为 `文件名 (1).ext`；无文件名属性的音乐自动回退为 `歌手 - 歌名.ext`；Telegram 普通压缩图片因服务端不保存原文件名，固定为 `<PhotoID>.jpg`）。
+
 ## 目录与文件
 
 ```
