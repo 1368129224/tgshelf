@@ -68,8 +68,22 @@ English | <a href="README_zh.md">简体中文</a>
 
 ```bash
 docker compose down          # stop
-docker compose up -d --build # update
+docker compose up -d --build # update (when building locally)
 ```
+
+### Docker images (GHCR)
+
+Multi-arch (`linux/amd64`, `linux/arm64`) distroless images are published to GitHub Container Registry at
+[`ghcr.io/1368129224/tgshelf`](https://github.com/1368129224/tgshelf/pkgs/container/tgshelf):
+
+| Image tag | Channel | Description |
+|---|---|---|
+| `ghcr.io/1368129224/tgshelf:latest`<br>`ghcr.io/1368129224/tgshelf:<version>` | **Stable** | Built from formal version tags (e.g. `:2.0.0`, `:v2.0.0`, `:latest`) |
+| `ghcr.io/1368129224/tgshelf:dev`<br>`ghcr.io/1368129224/tgshelf:prerelease`<br>`ghcr.io/1368129224/tgshelf:dev-<sha>` | **Pre-release** | Built automatically on every push to `dev` |
+
+`docker-compose.yml.example` builds from local source by default; to use a prebuilt GHCR image instead,
+comment out `build:` in `docker-compose.yml`, uncomment `image:`, and update with
+`docker compose pull && docker compose up -d`.
 
 ## Commands
 

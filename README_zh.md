@@ -67,8 +67,20 @@
 
 ```bash
 docker compose down          # 停止
-docker compose up -d --build # 升级（拉取新代码后重建）
+docker compose up -d --build # 升级（本地源码构建模式：拉取新代码后重建）
 ```
+
+### Docker 镜像说明（GHCR）
+
+官方多架构（`linux/amd64`、`linux/arm64`）distroless 镜像托管于 GitHub Container Registry：
+[`ghcr.io/1368129224/tgshelf`](https://github.com/1368129224/tgshelf/pkgs/container/tgshelf)
+
+| 镜像标签 | 渠道 | 说明 |
+|---|---|---|
+| `ghcr.io/1368129224/tgshelf:latest`<br>`ghcr.io/1368129224/tgshelf:<版本号>` | **正式版（Stable）** | 推送正式版本 Tag 时构建（如 `:2.0.0`、`:v2.0.0`、`:latest`） |
+| `ghcr.io/1368129224/tgshelf:dev`<br>`ghcr.io/1368129224/tgshelf:prerelease`<br>`ghcr.io/1368129224/tgshelf:dev-<sha>` | **预发布（Pre-release）** | `dev` 分支每次提交后自动构建推送 |
+
+`docker-compose.yml.example` 默认从本地源码构建；若希望直接拉取预构建镜像，可在 `docker-compose.yml` 中注释掉 `build:` 并启用对应的 `image:` 行，后续通过 `docker compose pull && docker compose up -d` 升级。
 
 ## 命令
 
