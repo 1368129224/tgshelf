@@ -90,6 +90,7 @@ func (m *Manager) run(id string, work func(ctx context.Context, t state.Task) er
 	ctx, cancel := context.WithCancel(context.Background())
 	m.live[id] = cancel
 	m.mu.Unlock()
+	defer cancel()
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -100,23 +101,43 @@ func (m *Manager) run(id string, work func(ctx context.Context, t state.Task) er
 			)
 			m.mu.Lock()
 			delete(m.live, id)
-			m.mu.Unlock()
 			_ = m.store.TransitionTask(id, state.StateFailed)
+			m.mu.Unlock()
 		}
 	}()
 
 	err := work(ctx, t)
 
-	// -- Winding down: move to a terminal state only while still RUNNING; the semaphore is
-	// released either way (already done by the defer) --
+	// -- Winding down: move to a terminal state atomically with live-map removal; the semaphore
+	// is released either way (already done by the defer). If work already called Finish, this
+	// transition is an idempotent no-op. --
 	m.mu.Lock()
 	delete(m.live, id)
-	m.mu.Unlock()
 	if err == nil {
 		_ = m.store.TransitionTask(id, state.StateDone)
 	} else {
 		_ = m.store.TransitionTask(id, state.StateFailed)
 	}
+	m.mu.Unlock()
+}
+
+// Finish atomically transitions a RUNNING task to a terminal state (StateDone or StateFailed)
+// under m.mu, returning the task's resulting state. Callers should invoke Finish before editing
+// the terminal Telegram message so a concurrent Cancel cannot slip in and overwrite it.
+func (m *Manager) Finish(id string, target state.TaskState) state.TaskState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.live, id)
+	t, ok := m.store.GetTask(id)
+	if !ok {
+		return target
+	}
+	if t.State == state.StateRunning {
+		if err := m.store.TransitionTask(id, target); err == nil {
+			return target
+		}
+	}
+	return t.State
 }
 
 // Cancel cancels a task. It works for both PENDING and RUNNING:

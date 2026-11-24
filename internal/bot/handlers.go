@@ -234,10 +234,19 @@ func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string)
 			})
 		}
 
+		// Commit the terminal state atomically before editing the final message so a concurrent
+		// Cancel cannot transition a finished task to CANCELLED and overwrite "✅ Download complete"
+		// with "⛔ Cancelling…".
+		targetState := state.StateDone
+		if runErr != nil {
+			targetState = state.StateFailed
+		}
+		finalState := b.tasks.Finish(taskID, targetState)
+
 		// Cancel path: /cancel or the "Cancel" button may have written only "Cancelling…", so
 		// finish the cancellation text here and drop the buttons. Never write "❌ Download failed"
 		// over a cancellation - that is exactly what made real acceptance item 4 fail.
-		if cur, ok := b.tasks.Get(taskID); ok && cur.State == state.StateCancelled {
+		if finalState == state.StateCancelled {
 			b.logger.Info("download task cancelled",
 				zap.String("task_id", taskID),
 				zap.String("link", link),
@@ -531,11 +540,13 @@ func (b *Bot) onCancelTask(ctx context.Context, cbq *models.CallbackQuery, cb Ca
 	}
 
 	msg := "Cancelling…"
+	var markup *models.InlineKeyboardMarkup
 	if prev == state.StatePending {
 		msg = "Cancelled (it was still queued and never started)"
+		markup = emptyMarkup()
 	}
 	if updated.MessageID > 0 {
-		b.editTerminal(task.ChatID, int(updated.MessageID), "⛔ "+msg, nil)
+		b.editTerminal(task.ChatID, int(updated.MessageID), "⛔ "+msg, markup)
 	}
 	return b.answerCallback(ctx, cbq, msg, false)
 }
