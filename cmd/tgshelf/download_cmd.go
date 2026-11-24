@@ -279,6 +279,7 @@ type dlEngine struct {
 	keepParts bool
 	stats     *rpcStats
 	out       io.Writer
+	printMu   sync.Mutex
 	started   time.Time
 	pool      dcpool.Pool
 }
@@ -374,9 +375,15 @@ func runDownload(cfg *config.Config, configPath string, args *downloadArgs) erro
 	if threads <= 0 {
 		threads = cfg.Download.Threads
 	}
+	if threads <= 0 {
+		threads = 1
+	}
 	fileConc := args.fileConcurrency
 	if fileConc <= 0 {
 		fileConc = cfg.Download.FileConcurrency
+	}
+	if fileConc <= 0 {
+		fileConc = 1
 	}
 	chunk := args.chunkBytes
 	if chunk <= 0 {
@@ -534,16 +541,21 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 	}
 
 	// 3) File-level concurrent download: semaphore queueing, the timeline proves the queueing.
+	fileConc := e.fileConc
+	if fileConc <= 0 {
+		fileConc = 1
+	}
 	results := make([]fileStat, len(items))
 	var (
 		wg        sync.WaitGroup
-		sem       = make(chan struct{}, e.fileConc)
+		sem       = make(chan struct{}, fileConc)
 		global    atomic.Int64
 		doneCount atomic.Int64
-		printMu   sync.Mutex
 	)
 	progressStop := make(chan struct{})
+	progressDone := make(chan struct{})
 	go func() {
+		defer close(progressDone)
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 		for {
@@ -551,11 +563,11 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 			case <-progressStop:
 				return
 			case <-t.C:
-				printMu.Lock()
+				e.printMu.Lock()
 				_, _ = fmt.Fprintf(e.out, "[progress] %s / %s (%d/%d files finished) elapsed %s\n",
 					fs.HumanBytes(global.Load()), fs.HumanBytes(total),
 					doneCount.Load(), len(items), time.Since(e.started).Round(time.Millisecond))
-				printMu.Unlock()
+				e.printMu.Unlock()
 			}
 		}
 	}()
@@ -565,7 +577,14 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 		go func(i int) {
 			defer wg.Done()
 			e.timeline(fmt.Sprintf("queued file[%d] %s", i, items[i].rel))
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i] = fileStat{relPath: items[i].rel, err: ctx.Err()}
+				doneCount.Add(1)
+				e.timeline(fmt.Sprintf("end file[%d] %s state=CANCEL", i, items[i].rel))
+				return
+			}
 			defer func() { <-sem }()
 			e.timeline(fmt.Sprintf("start file[%d] %s", i, items[i].rel))
 			results[i] = e.runOneFile(ctx, counting, items[i], refreshFor(items[i]), func(delta int64) { global.Add(delta) })
@@ -582,6 +601,7 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 	}
 	wg.Wait()
 	close(progressStop)
+	<-progressDone
 
 	// 4) Summary.
 	e.printSummary(results, resolveErrs, total, global.Load(), time.Since(e.started))
@@ -599,11 +619,15 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 
 // timeline prints an event line with a relative timestamp (concurrency safe).
 func (e *dlEngine) timeline(msg string) {
+	e.printMu.Lock()
 	_, _ = fmt.Fprintf(e.out, "[timeline t+%.3fs] %s\n", time.Since(e.started).Seconds(), msg)
+	e.printMu.Unlock()
 }
 
 // printSummary prints the summary report: per-file results + global statistics.
 func (e *dlEngine) printSummary(results []fileStat, resolveErrs []string, total, done int64, elapsed time.Duration) {
+	e.printMu.Lock()
+	defer e.printMu.Unlock()
 	out := e.out
 	_, _ = fmt.Fprintln(out, "=== download summary ===")
 	var okN, skipN, failN int
@@ -639,6 +663,10 @@ func (e *dlEngine) printSummary(results []fileStat, resolveErrs []string, total,
 // independent copy of the bitmap snapshot -> NewDownloader -> Commit/Abort -> MD5.
 func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, refresh tg.RefreshFunc, onDelta func(int64)) fileStat {
 	res := fileStat{relPath: it.rel}
+	if err := ctx.Err(); err != nil {
+		res.err = err
+		return res
+	}
 	size := it.item.Size
 	final := filepath.Join(e.root, filepath.FromSlash(it.rel))
 	if abs, aerr := filepath.Abs(final); aerr == nil {
