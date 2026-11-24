@@ -161,14 +161,44 @@ func (b *Bot) dispatchCommand(ctx context.Context, msg *models.Message, cmd stri
 	return err
 }
 
+var errDuplicateTask = errors.New("bot: task already downloading")
+
+// tryReserveDownload atomically checks both in-flight reservations and active store tasks so
+// rapid double-taps cannot start two concurrent downloads for the same (chatID, link, tag).
+func (b *Bot) tryReserveDownload(chatID int64, link, tag string) (func(), bool) {
+	key := inflightKey{chatID: chatID, link: link, tag: tag}
+	b.inflightMu.Lock()
+	if b.inflight == nil {
+		b.inflight = make(map[inflightKey]struct{})
+	}
+	if _, busy := b.inflight[key]; busy || b.hasActiveTask(chatID, link, tag) {
+		b.inflightMu.Unlock()
+		return nil, false
+	}
+	b.inflight[key] = struct{}{}
+	b.inflightMu.Unlock()
+	return func() {
+		b.inflightMu.Lock()
+		delete(b.inflight, key)
+		b.inflightMu.Unlock()
+	}, true
+}
+
 // startDownload is the single entry point for starting a download task (shared by onSelectTag and
 // onRetry).
 //
-// It returns the new task's ID. Deduplication is the caller's job (see hasActiveTask).
+// It returns the new task's ID, or errDuplicateTask if the same (chatID, link, tag) is already
+// active or being started.
 func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string) (string, error) {
+	release, ok := b.tryReserveDownload(chatID, link, tag)
+	if !ok {
+		return "", errDuplicateTask
+	}
+	defer release()
+
 	// The task ID is created before the placeholder message: the placeholder needs a "Cancel"
 	// button, and the button carries the taskID.
-	taskID := fmt.Sprintf("%d-%d", chatID, b.now().UnixNano())
+	taskID := fmt.Sprintf("%d-%d-%d", chatID, b.now().UnixNano(), b.idSeq.Add(1))
 
 	placeholder, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID: chatID,
@@ -441,12 +471,10 @@ func (b *Bot) onSelectTag(ctx context.Context, cbq *models.CallbackQuery, cb Cal
 	}
 	tag := b.cfg.Tags[cb.TagIdx]
 
-	// Deduplication: don't start a second task while the same link + tag is running.
-	if b.hasActiveTask(chatID, link, tag) {
-		return b.answerCallback(ctx, cbq, "This link is already downloading", true)
-	}
-
 	if _, err := b.startDownload(ctx, chatID, link, tag); err != nil {
+		if errors.Is(err, errDuplicateTask) {
+			return b.answerCallback(ctx, cbq, "This link is already downloading", true)
+		}
 		return b.answerCallback(ctx, cbq, "Could not start: "+b.translate(err), true)
 	}
 
@@ -563,15 +591,10 @@ func (b *Bot) onRetry(ctx context.Context, cbq *models.CallbackQuery, cb Callbac
 	if !isAdmin(b.cfg, cbq.From.ID) && (!hasChat || old.ChatID != chatID) {
 		return b.answerCallback(ctx, cbq, "You can only retry your own tasks", true)
 	}
-	if b.hasActiveTask(old.ChatID, old.Link, old.Tag) {
-		return b.answerCallback(ctx, cbq, "This link is already downloading", true)
-	}
-	b.logger.Info("user triggered a retry of the download task",
-		zap.String("old_task_id", cb.TaskID),
-		zap.String("link", old.Link),
-		zap.String("tag", old.Tag),
-	)
 	if _, err := b.startDownload(ctx, old.ChatID, old.Link, old.Tag); err != nil {
+		if errors.Is(err, errDuplicateTask) {
+			return b.answerCallback(ctx, cbq, "This link is already downloading", true)
+		}
 		return b.answerCallback(ctx, cbq, "Retry failed: "+b.translate(err), true)
 	}
 	return b.answerCallback(ctx, cbq, "Download restarted", false)

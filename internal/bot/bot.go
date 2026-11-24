@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tgbot "github.com/go-telegram/bot"
@@ -42,6 +43,12 @@ type callbackHandlerFunc func(ctx context.Context, cbq *models.CallbackQuery) er
 // package does not hard-bind gotd).
 type DownloadFunc func(ctx context.Context, t state.Task, report func(tg.TaskProgress)) error
 
+type inflightKey struct {
+	chatID int64
+	link   string
+	tag    string
+}
+
 // Bot is the assembly and scheduling layer of the Telegram bot.
 type Bot struct {
 	api    BotAPI
@@ -54,6 +61,14 @@ type Bot struct {
 
 	// depMu protects mutable runtime callbacks swapped on MTProto reconnects.
 	depMu sync.RWMutex
+
+	// inflightMu/inflight reserve (chatID, link, tag) across the SendMessage -> Submit gap
+	// so rapid double-taps cannot bypass duplicate-task checks.
+	inflightMu sync.Mutex
+	inflight   map[inflightKey]struct{}
+
+	// idSeq disambiguates taskID and searchID generated within the same clock tick.
+	idSeq atomic.Uint64
 
 	download DownloadFunc
 	// logout is the /logout implementation; when nil, /logout only reports "not wired".

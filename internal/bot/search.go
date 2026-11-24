@@ -170,7 +170,7 @@ func (b *Bot) runSearch(ctx context.Context, chatID int64, placeholderID int, ch
 
 	// Cache the result and register the synthetic link; the tag buttons reuse the normal
 	// select flow, which puts "search:<id>" into state.Task.Link untouched.
-	searchID := fmt.Sprintf("%d", b.now().UnixNano())
+	searchID := fmt.Sprintf("%d-%d", b.now().UnixNano(), b.idSeq.Add(1))
 	searchStore.Put(searchID, items)
 	link := SearchLinkPrefix + searchID
 	shortID := b.links.Put(link)

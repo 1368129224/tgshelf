@@ -66,16 +66,18 @@ type LoginState struct {
 	PhoneCodeHash string
 	// ExpiresAt is when the state expires (reset to now+loginStateTTL as each step advances).
 	ExpiresAt time.Time
+	gen       uint64
 }
 
 // loginWizard is the /login wizard: one state per chat plus TTL cleanup.
 // The Bot owns the message in/out orchestration (the wizard only returns reply text and errors),
 // so the struct holds no BotAPI - the dependency direction stays wizard -> abstract interfaces.
 type loginWizard struct {
-	mu     sync.Mutex
-	states map[int64]LoginState
-	getAPI LoginAPIGetter
-	logger *zap.Logger
+	mu      sync.Mutex
+	states  map[int64]LoginState
+	nextGen uint64
+	getAPI  LoginAPIGetter
+	logger  *zap.Logger
 }
 
 // newLoginWizard creates the wizard. With a nil getAPI, Handle reports "login RPC not wired".
@@ -111,6 +113,23 @@ func (w *loginWizard) setState(chatID int64, st LoginState) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.states[chatID] = st
+}
+
+// advanceState updates the chat's wizard state only if it still exists with expectedGen.
+// This prevents an in-flight RPC from resurrecting a wizard that was cancelled or restarted.
+func (w *loginWizard) advanceState(chatID int64, expectedGen uint64, st LoginState) bool {
+	if st.ExpiresAt.IsZero() {
+		st.ExpiresAt = time.Now().Add(loginStateTTL)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cur, ok := w.states[chatID]
+	if !ok || cur.gen != expectedGen {
+		return false
+	}
+	st.gen = expectedGen
+	w.states[chatID] = st
+	return true
 }
 
 // clear deletes the chat's state (successful login / explicit cancel / expiry cleanup).
@@ -157,11 +176,15 @@ func (w *loginWizard) Start(chatID, userID int64) (string, error) {
 	if w.currentGetAPI() == nil {
 		return "", errors.New("bot: login RPC not wired")
 	}
-	w.setState(chatID, LoginState{
+	w.mu.Lock()
+	w.nextGen++
+	w.states[chatID] = LoginState{
 		UserID:    userID,
 		Step:      LoginStepPhone,
 		ExpiresAt: time.Now().Add(loginStateTTL),
-	})
+		gen:       w.nextGen,
+	}
+	w.mu.Unlock()
 	return "Send your phone number in international format, e.g. +8613800138000:", nil
 }
 
@@ -214,7 +237,9 @@ func (w *loginWizard) handlePhone(ctx context.Context, api LoginAPI, chatID int6
 	st.Phone = phone
 	st.PhoneCodeHash = hash
 	st.ExpiresAt = time.Now().Add(loginStateTTL)
-	w.setState(chatID, st)
+	if !w.advanceState(chatID, st.gen, st) {
+		return "", ErrLoginNotStarted
+	}
 	return "Login code sent. Enter the code you received:", nil
 }
 
@@ -232,7 +257,9 @@ func (w *loginWizard) handleCode(ctx context.Context, api LoginAPI, chatID int64
 	if needPassword {
 		st.Step = LoginStepPassword
 		st.ExpiresAt = time.Now().Add(loginStateTTL)
-		w.setState(chatID, st)
+		if !w.advanceState(chatID, st.gen, st) {
+			return "", ErrLoginNotStarted
+		}
 		return "This account has two-step verification enabled. Enter your 2FA password:", nil
 	}
 	w.clear(chatID)
