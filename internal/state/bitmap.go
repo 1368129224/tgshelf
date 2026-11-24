@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/bits"
 )
 
 // Bitmap is the bitmap type used to track resume progress.
@@ -71,10 +72,7 @@ func (b *Bitmap) Get(i int) (bool, error) {
 func (b *Bitmap) Count() int {
 	n := 0
 	for _, by := range b.data {
-		for by != 0 {
-			n += int(by & 1)
-			by >>= 1
-		}
+		n += bits.OnesCount8(by)
 	}
 	return n
 }

@@ -222,6 +222,9 @@ func (e *Editor) update(ctx context.Context, chatID int64, messageID int, text s
 		st.hasItemsDone = true
 	}
 	markup := e.markup
+	if final {
+		delete(e.samples, key)
+	}
 	e.mu.Unlock()
 
 	params := &tgbot.EditMessageTextParams{

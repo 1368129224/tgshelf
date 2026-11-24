@@ -232,7 +232,7 @@ func (b *Bot) notifyStartup(ctx context.Context) {
 		b.logger.Warn("no allowed_user_ids / admin_user_ids configured, cannot send the startup notification")
 		return
 	}
-	text := b.startupText()
+	text := b.startupText(ctx)
 	for _, id := range targets {
 		if _, err := b.sendText(ctx, id, text); err != nil {
 			b.logger.Warn("failed to send the startup notification (the user may never have chatted with the bot)",
@@ -242,13 +242,15 @@ func (b *Bot) notifyStartup(ctx context.Context) {
 }
 
 // startupText builds the startup notification body (it contains no secret).
-func (b *Bot) startupText() string {
+func (b *Bot) startupText(ctx context.Context) string {
+	acctCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	var sb strings.Builder
 	sb.WriteString("✅ tgshelf is up and running.\n\n")
 	fmt.Fprintf(&sb, "Download folder: %s\n", b.cfg.DownloadPath)
 	fmt.Fprintf(&sb, "Tags: %s\n", strings.Join(b.cfg.Tags, ", "))
 	fmt.Fprintf(&sb, "Concurrent tasks: %d\n", b.cfg.Bot.MaxConcurrency)
-	sb.WriteString("Account: " + b.accountStatus(context.Background()) + "\n\n")
+	sb.WriteString("Account: " + b.accountStatus(acctCtx) + "\n\n")
 	sb.WriteString("Send a t.me link to download; /help for commands.")
 	return sb.String()
 }

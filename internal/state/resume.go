@@ -86,7 +86,8 @@ func WithMtime(t time.Time) Option {
 // Bitmap itself is not concurrency safe, so every access happens under the internal lock
 // of Session.
 type Session struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	flushMu sync.Mutex // serializes disk Flush/Commit/Close without holding mu across I/O
 
 	meta      ResumeMeta
 	numChunks int64
@@ -393,39 +394,51 @@ func (s *Session) ShouldFlush(completedChunks int) bool {
 // Flush fsyncs the part file first and then persists .state atomically (temp+rename+fsync).
 // Ordering matters for crash safety: .state must never mark chunks done before their bytes
 // are durable in .part.
-// Safe for concurrent calls: serialization happens under the internal lock; Flush after
-// Commit is a no-op.
+// Safe for concurrent calls: flushMu serializes disk I/O while mu is only held for the
+// in-memory snapshot, so concurrent WriteAt/MarkDone calls are not blocked on fsync.
+// Flush after Commit is a no-op.
 func (s *Session) Flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.committed {
+		s.mu.Unlock()
 		return nil
 	}
 	if s.f == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("resume: session closed")
 	}
-	if err := s.f.Sync(); err != nil {
-		return fmt.Errorf("resume: sync part %q: %w", s.partPath, err)
-	}
+	f := s.f
+	partPath := s.partPath
+	statePath := s.statePath
 	rs := resumeState{
 		V:         resumeStateVersion,
 		Size:      s.meta.Size,
 		Chunk:     s.meta.ChunkSize,
-		Done:      s.bm,
+		Done:      &Bitmap{data: s.bm.Bytes()},
 		DocID:     s.meta.DocID,
 		Peer:      s.meta.Peer,
 		MsgID:     s.meta.MsgID,
 		UpdatedAt: time.Now().Unix(),
 	}
+	s.mu.Unlock()
+
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("resume: sync part %q: %w", partPath, err)
+	}
 	b, err := json.Marshal(rs)
 	if err != nil {
 		return fmt.Errorf("resume: marshal state: %w", err)
 	}
-	if err := internfs.AtomicWriteFile(s.statePath, b, resumeFilePerm); err != nil {
-		return fmt.Errorf("resume: write state %q: %w", s.statePath, err)
+	if err := internfs.AtomicWriteFile(statePath, b, resumeFilePerm); err != nil {
+		return fmt.Errorf("resume: write state %q: %w", statePath, err)
 	}
+	s.mu.Lock()
 	s.chunksSince = 0
 	s.lastFlush = time.Now()
+	s.mu.Unlock()
 	return nil
 }
 
@@ -436,6 +449,8 @@ func (s *Session) Flush() error {
 // default deletes it).
 // After Commit, Flush becomes a no-op and MarkDone returns an error.
 func (s *Session) Commit() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.committed {
@@ -455,22 +470,17 @@ func (s *Session) Commit() error {
 	if err := os.Rename(s.partPath, s.finalPath); err != nil {
 		return fmt.Errorf("resume: rename %q → %q: %w", s.partPath, s.finalPath, err)
 	}
+	s.committed = true
 	// rename itself is atomic, but the directory entry needs an fsync to survive a power loss.
 	if df, err := os.Open(filepath.Dir(s.finalPath)); err == nil {
 		_ = df.Sync()
 		_ = df.Close()
 	}
 
-	mtime := s.mtime
-	if mtime.IsZero() {
-		if info, err := os.Stat(s.finalPath); err == nil {
-			mtime = info.ModTime()
-		} else {
-			mtime = time.Now()
+	if !s.mtime.IsZero() {
+		if err := os.Chtimes(s.finalPath, s.mtime, s.mtime); err != nil {
+			return fmt.Errorf("resume: chtimes %q: %w", s.finalPath, err)
 		}
-	}
-	if err := os.Chtimes(s.finalPath, mtime, mtime); err != nil {
-		return fmt.Errorf("resume: chtimes %q: %w", s.finalPath, err)
 	}
 
 	if !s.keepState {
@@ -478,7 +488,6 @@ func (s *Session) Commit() error {
 			return fmt.Errorf("resume: remove state %q: %w", s.statePath, err)
 		}
 	}
-	s.committed = true
 	return nil
 }
 
@@ -486,6 +495,8 @@ func (s *Session) Commit() error {
 // only fsyncs the part file.
 // Session remains usable after Abort (WriteAt/MarkDone/Flush all work until Close).
 func (s *Session) Abort() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.committed || s.f == nil {
@@ -499,6 +510,8 @@ func (s *Session) Abort() error {
 
 // Close closes the part file handle. It returns nil after Commit. Safe to call multiple times.
 func (s *Session) Close() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.f == nil {
