@@ -3,6 +3,7 @@ package tg
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -90,9 +91,10 @@ func httpDialer(u *url.URL) (func(context.Context, string, string) (net.Conn, er
 	if host == "" {
 		return nil, fmt.Errorf("tg.ParseProxy: http(s) proxy is missing a hostname: %q", u.String())
 	}
+	useTLS := strings.EqualFold(u.Scheme, "https")
 	port := u.Port()
 	if port == "" {
-		if strings.EqualFold(u.Scheme, "https") {
+		if useTLS {
 			port = "443"
 		} else {
 			port = "80"
@@ -112,30 +114,35 @@ func httpDialer(u *url.URL) (func(context.Context, string, string) (net.Conn, er
 		d := net.Dialer{
 			KeepAlive: 30 * time.Second, // enable TCP KeepAlive so proxy software or routers do not drop idle long-lived connections
 		}
-		conn, err := d.DialContext(ctx, "tcp", proxyAddr)
+		rawConn, err := d.DialContext(ctx, "tcp", proxyAddr)
 		if err != nil {
 			return nil, fmt.Errorf("dial proxy %s: %w", proxyAddr, err)
+		}
+		var conn net.Conn = rawConn
+		if useTLS {
+			tlsConn := tls.Client(rawConn, &tls.Config{
+				ServerName: host,
+				MinVersion: tls.VersionTLS12,
+			})
+			if herr := tlsConn.HandshakeContext(ctx); herr != nil {
+				_ = rawConn.Close()
+				return nil, fmt.Errorf("TLS handshake with proxy %s: %w", proxyAddr, herr)
+			}
+			conn = tlsConn
 		}
 		// Use the ctx deadline during the handshake so a dead proxy cannot block forever.
 		if deadline, ok := ctx.Deadline(); ok {
 			_ = conn.SetDeadline(deadline)
 		}
 
-		// Watch ctx cancellation only during the handshake: if ctx times out or is cancelled
-		// while handshaking, close the connection and return immediately.
-		// As soon as the handshake completes (the function returns) this goroutine MUST exit!
-		// Never keep watching the handshake ctx and killing the connection after it has been
-		// handed to the caller (otherwise the caller's connection is closed under its feet and
-		// later fails with "use of closed network connection" for no apparent reason).
-		stopWatch := make(chan struct{})
-		defer close(stopWatch)
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = conn.Close()
-			case <-stopWatch:
-			}
-		}()
+		// Watch ctx cancellation only during the CONNECT handshake: if ctx times out or is
+		// cancelled while handshaking, close the connection and return immediately.
+		// Calling stop() before returning guarantees the callback will never fire on the live
+		// connection handed to the caller; if stop() returns false, cancellation already won.
+		stop := context.AfterFunc(ctx, func() {
+			_ = conn.Close()
+		})
+		defer stop()
 
 		req := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n" + authHeader + "\r\n"
 		if _, werr := conn.Write([]byte(req)); werr != nil {
@@ -152,6 +159,10 @@ func httpDialer(u *url.URL) (func(context.Context, string, string) (net.Conn, er
 		if resp.StatusCode != http.StatusOK {
 			_ = conn.Close()
 			return nil, fmt.Errorf("proxy returned status code %d", resp.StatusCode)
+		}
+		if !stop() {
+			_ = conn.Close()
+			return nil, ctx.Err()
 		}
 		_ = conn.SetDeadline(time.Time{})
 
