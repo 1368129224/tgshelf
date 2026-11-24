@@ -340,6 +340,7 @@ func startBot(ctx context.Context, cfg *config.Config, logger *zap.Logger, st *s
 			return nil
 		}
 
+		connectedAt := time.Now()
 		// Run one connection attempt inside a closure so defer pool.Close() executes on every
 		// reconnect cycle instead of accumulating until startBot returns.
 		runErr, fatalErr := func() (error, error) {
@@ -454,6 +455,9 @@ func startBot(ctx context.Context, cfg *config.Config, logger *zap.Logger, st *s
 		if ctx.Err() != nil {
 			// Clean shutdown (Ctrl-C / SIGTERM), not a failure.
 			return nil
+		}
+		if time.Since(connectedAt) > time.Minute {
+			backoff = time.Second
 		}
 
 		logger.Warn("Telegram connection lost, reconnecting",

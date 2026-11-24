@@ -143,6 +143,7 @@ func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.Task
 		}
 
 		items := make([]tg.TaskItem, 0, len(sourceItems))
+		seenRel := make(map[string]int, len(sourceItems))
 		var skipped []string // descriptions of the filtered-out items (reported to the user at the end)
 		isSearchTask := strings.HasPrefix(task.Link, bot.SearchLinkPrefix)
 		for _, it := range sourceItems {
@@ -162,6 +163,7 @@ func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.Task
 				skipped = append(skipped, fmt.Sprintf("%s (%s)", it.Name, reason))
 				continue
 			}
+			rel = dedupRelPath(seenRel, rel)
 			// Path traversal protection: reject the whole task when SafeJoin fails, never write to
 			// disk.
 			if _, jerr := naming.SafeJoin(root, rel); jerr != nil {

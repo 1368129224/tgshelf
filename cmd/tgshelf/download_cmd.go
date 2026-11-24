@@ -284,6 +284,24 @@ type dlEngine struct {
 	pool      dcpool.Pool
 }
 
+// dedupRelPath ensures rel is unique within a batch: 2nd duplicate gets _dup2, 3rd gets _dup3, etc.
+func dedupRelPath(seen map[string]int, rel string) string {
+	if seen[rel] == 0 {
+		seen[rel] = 1
+		return rel
+	}
+	ext := filepath.Ext(rel)
+	base := strings.TrimSuffix(rel, ext)
+	for n := seen[rel] + 1; ; n++ {
+		cand := fmt.Sprintf("%s_dup%d%s", base, n, ext)
+		if seen[cand] == 0 {
+			seen[rel] = n
+			seen[cand] = 1
+			return cand
+		}
+	}
+}
+
 // mediaDocID extracts the document ID of a MediaItem (0 when Location is nil or not a document).
 // internal/tg.docIDOf is unexported, so the same rule is implemented here.
 func mediaDocID(m tg.MediaItem) int64 {
@@ -490,11 +508,7 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 				resolveErrs = append(resolveErrs, fmt.Sprintf("[%s] path validation failed %q: %v", raw, rel, jerr))
 				continue
 			}
-			if n := seen[rel]; n > 0 {
-				ext := filepath.Ext(rel)
-				rel = strings.TrimSuffix(rel, ext) + fmt.Sprintf("_dup%d%s", n+1, ext)
-			}
-			seen[rel]++
+			rel = dedupRelPath(seen, rel)
 			items = append(items, dlItem{url: raw, item: item, rel: rel})
 		}
 	}
@@ -649,7 +663,10 @@ func (e *dlEngine) printSummary(results []fileStat, resolveErrs []string, total,
 		}
 	}
 	floods := e.stats.floodSnapshot()
-	mbps := float64(done) / elapsed.Seconds() / (1 << 20)
+	var mbps float64
+	if secs := elapsed.Seconds(); secs > 0 {
+		mbps = float64(done) / secs / (1 << 20)
+	}
 	_, _ = fmt.Fprintf(out, "succeeded %d/%d (skipped %d, failed %d, resolve failed %d) | downloaded %s / %s | elapsed %s | average %.2f MiB/s | getFile requests %d | FLOOD_WAIT %d times\n",
 		okN, len(results), skipN, failN, len(resolveErrs),
 		fs.HumanBytes(done), fs.HumanBytes(total), elapsed.Round(time.Millisecond), mbps,
