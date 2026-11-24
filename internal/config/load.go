@@ -120,7 +120,7 @@ func Save(path string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("writing config to %q: %w", path, err)
 	}
 	return nil
@@ -208,12 +208,18 @@ cache_dialogs_hours = 6
 // The comments come from a hard-coded template string and never pass through toml.Marshal,
 // so they are kept intact.
 func WriteDefault(path string) error {
-	// check whether it already exists
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("config file already exists at %q, refusing to overwrite", path)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("config file already exists at %q, refusing to overwrite", path)
+		}
+		return fmt.Errorf("writing default config to %q: %w", path, err)
 	}
-
-	if err := os.WriteFile(path, []byte(defaultConfigTemplate), 0o644); err != nil {
+	if _, err := f.WriteString(defaultConfigTemplate); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("writing default config to %q: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
 		return fmt.Errorf("writing default config to %q: %w", path, err)
 	}
 	return nil

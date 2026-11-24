@@ -22,13 +22,6 @@ import (
 	"github.com/1368129224/tgshelf/internal/tg"
 )
 
-// adminCommandHook is the injection point for admin commands.
-//
-// The command dispatcher knows nothing about /status /cancel /show_config /sync and so on;
-// admin.go implements those and injects them through this variable, so the two places never
-// fight over one method name. handled=true means the command was processed and err is its result.
-var adminCommandHook func(ctx context.Context, b *Bot, msg *models.Message, cmd string) (bool, error)
-
 const (
 	// helpText is the reply to /help and /start.
 	helpText = "Usage: send one or more t.me message links to the bot, pick a tag and it downloads them.\n\n" +
@@ -151,13 +144,10 @@ func (b *Bot) handleLinks(ctx context.Context, msg *models.Message) error {
 	return nil
 }
 
-// dispatchCommand dispatches non-builtin commands; admin commands are injected through
-// adminCommandHook.
+// dispatchCommand dispatches non-builtin commands to adminDispatch.
 func (b *Bot) dispatchCommand(ctx context.Context, msg *models.Message, cmd string) error {
-	if adminCommandHook != nil {
-		if handled, err := adminCommandHook(ctx, b, msg, cmd); handled {
-			return err
-		}
+	if handled, err := adminDispatch(ctx, b, msg, cmd); handled {
+		return err
 	}
 	_, err := b.sendText(ctx, msg.Chat.ID, fmt.Sprintf("Unknown command: %s\nSend /help for usage", cmd))
 	return err

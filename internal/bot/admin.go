@@ -52,11 +52,6 @@ func (b *Bot) getAccount() AccountFunc {
 	return fn
 }
 
-func init() {
-	// The command dispatcher lives in handlers.go; this only attaches this file's implementation.
-	adminCommandHook = adminDispatch
-}
-
 // adminDispatch is the single entry point for admin commands; handled means this file took the
 // command.
 func adminDispatch(ctx context.Context, b *Bot, msg *models.Message, cmd string) (bool, error) {

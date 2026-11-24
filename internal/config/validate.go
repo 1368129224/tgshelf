@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -36,6 +37,13 @@ func (c *Config) Validate() error {
 	} else {
 		seen := make(map[string]struct{}, len(c.Tags))
 		for _, tag := range c.Tags {
+			if strings.TrimSpace(tag) == "" {
+				errs = append(errs, "tags: tag must not be empty or whitespace")
+				continue
+			}
+			if tag == "." {
+				errs = append(errs, `tags: tag "." is not allowed`)
+			}
 			// duplicate check
 			if _, dup := seen[tag]; dup {
 				errs = append(errs, fmt.Sprintf("tags: duplicate tag %q", tag))
@@ -55,9 +63,17 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// proxy_url syntax check when configured
+	if rawProxy := strings.TrimSpace(c.ProxyURL); rawProxy != "" {
+		if u, err := url.Parse(rawProxy); err != nil || u.Scheme == "" {
+			errs = append(errs, fmt.Sprintf("proxy_url: invalid URL %q", c.ProxyURL))
+		}
+	}
+
 	// identity accepts only the two known values; an unknown value never falls back
 	// silently (that would quietly change the access identity).
-	switch c.Telegram.EffectiveIdentity() {
+	identity := c.Telegram.EffectiveIdentity()
+	switch identity {
 	case IdentityTDDesktop, IdentityCustom:
 	default:
 		errs = append(errs, fmt.Sprintf(
@@ -65,9 +81,11 @@ func (c *Config) Validate() error {
 			IdentityTDDesktop, IdentityCustom, c.Telegram.Identity))
 	}
 
-	// api_id and api_hash must be set as a pair. The tdesktop identity uses built-in
-	// credentials, so the user need not provide them.
-	hasAPIID := c.Telegram.APIID != 0
+	// api_id and api_hash must be set as a pair (and are mandatory under "custom" identity).
+	if c.Telegram.APIID < 0 {
+		errs = append(errs, fmt.Sprintf("telegram.api_id: must be >= 0, got %d", c.Telegram.APIID))
+	}
+	hasAPIID := c.Telegram.APIID > 0
 	hasAPIHash := strings.TrimSpace(c.Telegram.APIHash) != ""
 	if hasAPIID != hasAPIHash {
 		if hasAPIID {
@@ -75,6 +93,8 @@ func (c *Config) Validate() error {
 		} else {
 			errs = append(errs, "telegram.api_hash is set but telegram.api_id is 0; they must be set together")
 		}
+	} else if identity == IdentityCustom && !hasAPIID {
+		errs = append(errs, `telegram.identity is "custom" but telegram.api_id / telegram.api_hash are not set`)
 	}
 
 	// max_concurrency: [1, 16]
