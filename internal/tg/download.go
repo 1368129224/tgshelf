@@ -302,17 +302,19 @@ func (d *Downloader) downloadChunk(
 				if ctx.Err() != nil {
 					return rerr
 				}
-				if errors.Is(rerr, ErrRefreshTooFrequent) {
-					// Rate limit/limit hit: the whole file fails, no more looping.
-					abort.Store(true)
+				if errors.Is(rerr, ErrRefreshTooFrequent) ||
+					errors.Is(rerr, ErrMessageDeleted) ||
+					errors.Is(rerr, ErrNoMedia) ||
+					errors.Is(rerr, ErrChannelInaccessible) {
+					// Permanent or rate-limited refresh failure: abort immediately.
 					setErr(idx, offset, rerr)
 					return rerr
 				}
-				// Non-rate-limited refresh failure: keep the old Location and retry the current
-				// chunk; the refresher's cumulative attempt cap guarantees the loop terminates.
-			} else {
-				cur = newLoc
+				// Transient refresh failure: retry refresh without replaying fetchChunk on the
+				// already-expired Location (Refresher.maxRefreshes bounds total attempts).
+				continue
 			}
+			cur = newLoc
 		}
 		gen0 = ref.Gen()
 		d.logger.Info("tg: file reference updated, retrying current chunk",

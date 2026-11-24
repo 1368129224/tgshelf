@@ -191,18 +191,23 @@ func (r *Refresher) run(ctx context.Context) (tg.InputFileLocationClass, error) 
 	for {
 		r.mu.Lock()
 		n := r.count
-		if n >= r.maxRefreshes {
-			r.mu.Unlock()
+		last := r.last
+		cooldown := r.cooldown
+		maxRefreshes := r.maxRefreshes
+		r.mu.Unlock()
+
+		if n >= maxRefreshes {
 			err := fmt.Errorf("tg: %w (already refreshed %d times, limit %d): %w",
-				ErrRefreshTooFrequent, n, r.maxRefreshes, ErrFileRefExpired)
-			if !r.last.IsZero() && time.Since(r.last) < r.cooldown {
-				err = fmt.Errorf("tg: %w (last refresh less than %v ago, refreshed %d times): %w",
-					ErrRefreshTooFrequent, r.cooldown, n, ErrFileRefExpired)
-			}
+				ErrRefreshTooFrequent, n, maxRefreshes, ErrFileRefExpired)
 			r.logger.Warn("tg: file reference refresh rate limited", zap.Int("count", n), zap.Error(err))
 			return nil, err
 		}
-		r.mu.Unlock()
+		if !staleRetried && cooldown > 0 && !last.IsZero() && time.Since(last) < cooldown {
+			err := fmt.Errorf("tg: %w (last refresh less than %v ago, refreshed %d times): %w",
+				ErrRefreshTooFrequent, cooldown, n, ErrFileRefExpired)
+			r.logger.Warn("tg: file reference refresh rate limited", zap.Int("count", n), zap.Error(err))
+			return nil, err
+		}
 
 		if staleRetried {
 			// Same-reference detection hit: wait and retry once (immediate when injected
