@@ -390,7 +390,9 @@ func (s *Session) ShouldFlush(completedChunks int) bool {
 	return time.Since(s.lastFlush) >= resumeFlushInterval
 }
 
-// Flush persists .state atomically (temp+rename+fsync) and fsyncs the part file.
+// Flush fsyncs the part file first and then persists .state atomically (temp+rename+fsync).
+// Ordering matters for crash safety: .state must never mark chunks done before their bytes
+// are durable in .part.
 // Safe for concurrent calls: serialization happens under the internal lock; Flush after
 // Commit is a no-op.
 func (s *Session) Flush() error {
@@ -401,6 +403,9 @@ func (s *Session) Flush() error {
 	}
 	if s.f == nil {
 		return fmt.Errorf("resume: session closed")
+	}
+	if err := s.f.Sync(); err != nil {
+		return fmt.Errorf("resume: sync part %q: %w", s.partPath, err)
 	}
 	rs := resumeState{
 		V:         resumeStateVersion,
@@ -418,9 +423,6 @@ func (s *Session) Flush() error {
 	}
 	if err := internfs.AtomicWriteFile(s.statePath, b, resumeFilePerm); err != nil {
 		return fmt.Errorf("resume: write state %q: %w", s.statePath, err)
-	}
-	if err := s.f.Sync(); err != nil {
-		return fmt.Errorf("resume: sync part %q: %w", s.partPath, err)
 	}
 	s.chunksSince = 0
 	s.lastFlush = time.Now()
