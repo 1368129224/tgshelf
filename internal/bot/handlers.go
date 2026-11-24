@@ -104,7 +104,9 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 // group). A failed delete does not block the login flow.
 func (b *Bot) handleLoginInput(ctx context.Context, msg *models.Message) error {
 	chatID := msg.Chat.ID
-	text := strings.TrimSpace(msg.Text)
+	// Pass raw msg.Text: wizard.go trims phone/code where appropriate, while preserving
+	// leading/trailing spaces in 2FA passwords.
+	text := msg.Text
 
 	// Delete first, then reply: even if a later RPC fails, the sensitive content is already gone
 	// from the chat.
@@ -332,7 +334,7 @@ func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string)
 			zap.String("tag", tag),
 			zap.Error(err),
 		)
-		_ = b.editTerminalSync(ctx, chatID, msgID, "❌ Could not create the task: "+b.translate(err), nil)
+		_ = b.editTerminalSync(ctx, chatID, msgID, "❌ Could not create the task: "+b.translate(err), emptyMarkup())
 		return "", err
 	}
 	return taskID, nil

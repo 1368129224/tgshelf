@@ -364,7 +364,11 @@ func humanBytes(n float64) string {
 }
 
 // formatETA formats a number of seconds as mm:ss (under one hour) or HH:MM:SS.
+// Extremely large / infinite values are capped to avoid int overflow when speed decays toward 0.
 func formatETA(seconds float64) string {
+	if math.IsNaN(seconds) || math.IsInf(seconds, 1) || seconds > 99*3600 {
+		return ">99h"
+	}
 	total := int(math.Max(0, math.Floor(seconds)))
 	hours, rem := total/3600, total%3600
 	minutes, secs := rem/60, rem%60

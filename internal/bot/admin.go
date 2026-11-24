@@ -131,8 +131,36 @@ func (b *Bot) cmdStatus(ctx context.Context, msg *models.Message) error {
 	writeGroup("▶️ Downloading", state.StateRunning)
 	writeGroup("⏳ Queued", state.StatePending)
 
-	_, err := b.sendText(ctx, msg.Chat.ID, sb.String())
-	return err
+	for _, chunk := range splitMessageChunks(sb.String(), 3800) {
+		if _, err := b.sendText(ctx, msg.Chat.ID, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// splitMessageChunks splits a long multi-line message into chunks within Telegram's 4096-rune limit.
+func splitMessageChunks(text string, maxBytes int) []string {
+	if len(text) <= maxBytes {
+		return []string{text}
+	}
+	lines := strings.Split(text, "\n")
+	var chunks []string
+	var cur strings.Builder
+	for _, line := range lines {
+		if cur.Len() > 0 && cur.Len()+1+len(line) > maxBytes {
+			chunks = append(chunks, cur.String())
+			cur.Reset()
+		}
+		if cur.Len() > 0 {
+			cur.WriteByte('\n')
+		}
+		cur.WriteString(line)
+	}
+	if cur.Len() > 0 {
+		chunks = append(chunks, cur.String())
+	}
+	return chunks
 }
 
 // taskProgressPercent estimates the percentage from the items' downloaded bytes; it returns -1
@@ -189,9 +217,14 @@ func (b *Bot) cmdCancel(ctx context.Context, msg *models.Message, cmd string) er
 			if !admin && t.ChatID != msg.Chat.ID {
 				continue
 			}
+			prev := t.State
 			if _, err := b.tasks.Cancel(t.ID); err != nil {
 				skipped++
 				continue
+			}
+			if prev == state.StatePending && t.MessageID > 0 {
+				_ = b.editTerminalSync(ctx, t.ChatID, int(t.MessageID),
+					"⛔ Cancelled (it was still queued and never started)", emptyMarkup())
 			}
 			cancelled++
 		}
