@@ -145,6 +145,9 @@ type perFileRPC struct {
 
 func (p *perFileRPC) UploadGetFile(ctx context.Context, req *tgpkg.UploadGetFileRequest) (tgpkg.UploadFileClass, error) {
 	p.local.Add(1)
+	if p.shared != nil {
+		p.shared.getFile.Add(1)
+	}
 	return p.inner.UploadGetFile(ctx, req)
 }
 
@@ -212,29 +215,36 @@ func downloadDevice(cfg *config.Config) telegram.DeviceConfig {
 	return tg.DeviceConfigFor(cfg.Telegram)
 }
 
+func downloadMiddlewares(ctx context.Context, stats *rpcStats) []telegram.Middleware {
+	return []telegram.Middleware{
+		recovery.New(ctx, dlReconnectBackoff()),
+		floodWaitCount{ctx: ctx, stats: stats},
+		retry.New(dlMaxRetries),
+	}
+}
+
 // buildDownloadClient builds a counting telegram.Client. The middleware chain matches
 // internal/tg defaultMiddlewares, with only floodWait replaced by the counting version.
-func buildDownloadClient(cfg *config.Config, storage *tg.SessionStorage, stats *rpcStats) (*telegram.Client, error) {
+func buildDownloadClient(ctx context.Context, cfg *config.Config, storage *tg.SessionStorage, stats *rpcStats) (*telegram.Client, error) {
+	creds, err := tg.ResolveCredentials(cfg.Telegram)
+	if err != nil {
+		return nil, err
+	}
 	resolver, err := tg.BuildResolver(cfg.ProxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("build proxy: %w", err)
 	}
-	rootCtx := context.Background()
 	opts := telegram.Options{
 		SessionStorage:      storage,
 		Device:              downloadDevice(cfg),
 		Resolver:            resolver,
 		ReconnectionBackoff: func() backoff.BackOff { return dlReconnectBackoff() },
-		Middlewares: []telegram.Middleware{
-			recovery.New(rootCtx, dlReconnectBackoff()),
-			floodWaitCount{ctx: rootCtx, stats: stats},
-			retry.New(dlMaxRetries),
-		},
-		RetryInterval: dlRetryInterval,
-		MaxRetries:    dlMaxRetries,
-		DialTimeout:   dlDialTimeout,
+		Middlewares:         downloadMiddlewares(ctx, stats),
+		RetryInterval:       dlRetryInterval,
+		MaxRetries:          dlMaxRetries,
+		DialTimeout:         dlDialTimeout,
 	}
-	return telegram.NewClient(cfg.Telegram.APIID, cfg.Telegram.APIHash, opts), nil
+	return telegram.NewClient(creds.AppID, creds.AppHash, opts), nil
 }
 
 // dlItem is one pending download entry: source link, media and the rendered safe relative path.
@@ -386,14 +396,14 @@ func runDownload(cfg *config.Config, configPath string, args *downloadArgs) erro
 	}
 	defer func() { _ = storage.Close() }()
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	stats := &rpcStats{started: time.Now()}
-	client, err := buildDownloadClient(cfg, storage, stats)
+	client, err := buildDownloadClient(ctx, cfg, storage, stats)
 	if err != nil {
 		return fmt.Errorf("build Telegram client: %w", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	dataDir := dataDirOf(configPath)
 	if err := fs.EnsureDir(dataDir, 0o700); err != nil {
@@ -412,7 +422,7 @@ func runDownload(cfg *config.Config, configPath string, args *downloadArgs) erro
 	if poolSize > 32 {
 		poolSize = 32
 	}
-	pool := dcpool.NewPool(client, poolSize)
+	pool := dcpool.NewPool(client, poolSize, downloadMiddlewares(ctx, stats)...)
 	defer func() { _ = pool.Close() }()
 
 	eng := &dlEngine{
@@ -705,14 +715,17 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 	refreshStart := e.stats.refreshes.Load()
 
 	var targetRPC = rpc
+	var sharedStats *rpcStats
 	if e.pool != nil {
+		// Pooled connections bypass countingRPC, so perFileRPC updates global getFile stats.
+		sharedStats = e.stats
 		if it.item.DCID > 0 {
 			targetRPC = e.pool.Client(ctx, it.item.DCID)
 		} else {
 			targetRPC = e.pool.Default(ctx)
 		}
 	}
-	dl, err := tg.NewDownloader(&perFileRPC{inner: targetRPC, shared: e.stats, local: &localReqs}, nil)
+	dl, err := tg.NewDownloader(&perFileRPC{inner: targetRPC, shared: sharedStats, local: &localReqs}, nil)
 	if err != nil {
 		res.err = fmt.Errorf("create download core: %w", err)
 		return res
