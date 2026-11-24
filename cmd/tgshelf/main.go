@@ -340,109 +340,117 @@ func startBot(ctx context.Context, cfg *config.Config, logger *zap.Logger, st *s
 			return nil
 		}
 
-		// Rebuild the client on every reconnect: a gotd Client cannot be reused after it is
-		// closed (c.ctx is already Done).
-		client, cerr := tg.New(cfg, storage)
-		if cerr != nil {
-			return fmt.Errorf("build Telegram client: %w", cerr)
-		}
-		api := client.API()
-		resolver, rerr := tg.NewPeerResolver(api, st, ttl)
-		if rerr != nil {
-			return fmt.Errorf("build peer resolver: %w", rerr)
-		}
-		pipeline, perr := tg.NewPipeline(api, resolver)
-		if perr != nil {
-			return fmt.Errorf("build resolve pipeline: %w", perr)
-		}
-		// Multi-DC connection pool for speed (aligned with tdl core/dcpool): every DC keeps its
-		// own pool, which gets past the single-connection rate limit and connects straight to
-		// the DC that holds the file.
-		poolSize := int64(cfg.Download.Threads * cfg.Download.FileConcurrency)
-		if poolSize < 8 {
-			poolSize = 8
-		}
-		if poolSize > 32 {
-			poolSize = 32
-		}
-		pool := client.NewPool(poolSize)
-		defer func() { _ = pool.Close() }()
-
-		// getFileRPC is satisfied by the *gotd API client (tg.Client in the internal package is
-		// an alias of the API client).
-		runner, nerr := tg.NewTaskRunner(api, logger, tg.RunnerConfig{
-			RootDir:         cfg.DownloadPath,
-			Threads:         cfg.Download.Threads,
-			FileConcurrency: cfg.Download.FileConcurrency,
-			SkipSame:        cfg.Download.SkipSame,
-			KeepParts:       cfg.Download.KeepParts,
-			Pool:            pool,
-			Takeout:         cfg.Download.Takeout,
-		})
-		if nerr != nil {
-			return fmt.Errorf("build download orchestrator: %w", nerr)
-		}
-		searcher, serr := tg.NewSearcher(api, resolver)
-		if serr != nil {
-			return fmt.Errorf("build media searcher: %w", serr)
-		}
-
-		b.SetDownload(newBotDownloader(cfg, pipeline, runner, searchStore, logger))
-		b.SetSearchMedia(newBotSearcher(searcher), searchStore)
-		b.SetSync(func(c context.Context, full bool) (int, error) {
-			return resolver.SyncDialogs(c, full)
-		})
-		b.SetAccount(func(c context.Context) (int64, string, int, error) {
-			return client.Self(c)
-		})
-		// Login wizard: phone number, login code, 2FA, all through real MTProto.
-		b.SetLoginAPI(func(context.Context) (bot.LoginAPI, error) {
-			return tgLoginAPI{client: client}, nil
-		})
-		// /logout: delete the session file. The current process still holds the connection, so a
-		// restart is needed to be truly logged out.
-		b.SetLogout(func(context.Context) error {
-			if err := os.Remove(sessionPath); err != nil && !os.IsNotExist(err) {
-				return err
+		// Run one connection attempt inside a closure so defer pool.Close() executes on every
+		// reconnect cycle instead of accumulating until startBot returns.
+		runErr, fatalErr := func() (error, error) {
+			// Rebuild the client on every reconnect: a gotd Client cannot be reused after it is
+			// closed (c.ctx is already Done).
+			client, cerr := tg.New(cfg, storage)
+			if cerr != nil {
+				return nil, fmt.Errorf("build Telegram client: %w", cerr)
 			}
-			return nil
-		})
+			api := client.API()
+			resolver, rerr := tg.NewPeerResolver(api, st, ttl)
+			if rerr != nil {
+				return nil, fmt.Errorf("build peer resolver: %w", rerr)
+			}
+			pipeline, perr := tg.NewPipeline(api, resolver)
+			if perr != nil {
+				return nil, fmt.Errorf("build resolve pipeline: %w", perr)
+			}
+			// Multi-DC connection pool for speed (aligned with tdl core/dcpool): every DC keeps its
+			// own pool, which gets past the single-connection rate limit and connects straight to
+			// the DC that holds the file.
+			poolSize := int64(cfg.Download.Threads * cfg.Download.FileConcurrency)
+			if poolSize < 8 {
+				poolSize = 8
+			}
+			if poolSize > 32 {
+				poolSize = 32
+			}
+			pool := client.NewPool(poolSize)
+			defer func() { _ = pool.Close() }()
 
-		// Takeout session (enabled by download.takeout=true).
-		// init must run inside the client.Run callback (only then is the MTProto connection
-		// ready); finish is hooked after the callback returns and uses its own ctx so the exit
-		// path can still run it.
-		var takeoutID int64
-
-		runErr := client.Run(ctx, func(cctx context.Context) error {
-			// Connection is ready: only now can the startup notification carry real account info.
-			if attempt == 1 {
-				b.Startup(cctx)
+			// getFileRPC is satisfied by the *gotd API client (tg.Client in the internal package is
+			// an alias of the API client).
+			runner, nerr := tg.NewTaskRunner(api, logger, tg.RunnerConfig{
+				RootDir:         cfg.DownloadPath,
+				Threads:         cfg.Download.Threads,
+				FileConcurrency: cfg.Download.FileConcurrency,
+				SkipSame:        cfg.Download.SkipSame,
+				KeepParts:       cfg.Download.KeepParts,
+				Pool:            pool,
+				Takeout:         cfg.Download.Takeout,
+			})
+			if nerr != nil {
+				return nil, fmt.Errorf("build download orchestrator: %w", nerr)
+			}
+			searcher, serr := tg.NewSearcher(api, resolver)
+			if serr != nil {
+				return nil, fmt.Errorf("build media searcher: %w", serr)
 			}
 
-			// takeout session initialization (a failure does not block bot startup; downloads
-			// fall back to a regular session for this round).
-			if cfg.Download.Takeout {
-				id, terr := tg.InitTakeoutSession(cctx, client.API(), 4000)
-				if terr != nil {
-					logger.Warn("init takeout session failed, downloads fall back to a regular session this round", zap.Error(terr))
-				} else {
-					takeoutID = id
-					logger.Info("takeout session ready", zap.Int64("takeout_id", id))
-					defer func() {
-						finCtx, finCancel := context.WithTimeout(context.Background(), 15*time.Second)
-						defer finCancel()
-						if ferr := tg.FinishTakeoutSession(finCtx, client.API(), takeoutID); ferr != nil {
-							logger.Warn("finish takeout session", zap.Error(ferr))
-						} else {
-							logger.Info("takeout session finished", zap.Int64("takeout_id", takeoutID))
-						}
-					}()
+			b.SetDownload(newBotDownloader(cfg, pipeline, runner, searchStore, logger))
+			b.SetSearchMedia(newBotSearcher(searcher), searchStore)
+			b.SetSync(func(c context.Context, full bool) (int, error) {
+				return resolver.SyncDialogs(c, full)
+			})
+			b.SetAccount(func(c context.Context) (int64, string, int, error) {
+				return client.Self(c)
+			})
+			// Login wizard: phone number, login code, 2FA, all through real MTProto.
+			b.SetLoginAPI(func(context.Context) (bot.LoginAPI, error) {
+				return tgLoginAPI{client: client}, nil
+			})
+			// /logout: delete the session file. The current process still holds the connection, so a
+			// restart is needed to be truly logged out.
+			b.SetLogout(func(context.Context) error {
+				if err := os.Remove(sessionPath); err != nil && !os.IsNotExist(err) {
+					return err
 				}
-			}
+				return nil
+			})
 
-			return b.Run(cctx)
-		})
+			// Takeout session (enabled by download.takeout=true).
+			// init must run inside the client.Run callback (only then is the MTProto connection
+			// ready); finish is hooked after the callback returns and uses its own ctx so the exit
+			// path can still run it.
+			var takeoutID int64
+
+			err := client.Run(ctx, func(cctx context.Context) error {
+				// Connection is ready: only now can the startup notification carry real account info.
+				if attempt == 1 {
+					b.Startup(cctx)
+				}
+
+				// takeout session initialization (a failure does not block bot startup; downloads
+				// fall back to a regular session for this round).
+				if cfg.Download.Takeout {
+					id, terr := tg.InitTakeoutSession(cctx, client.API(), 4000)
+					if terr != nil {
+						logger.Warn("init takeout session failed, downloads fall back to a regular session this round", zap.Error(terr))
+					} else {
+						takeoutID = id
+						logger.Info("takeout session ready", zap.Int64("takeout_id", id))
+						defer func() {
+							finCtx, finCancel := context.WithTimeout(context.Background(), 15*time.Second)
+							defer finCancel()
+							if ferr := tg.FinishTakeoutSession(finCtx, client.API(), takeoutID); ferr != nil {
+								logger.Warn("finish takeout session", zap.Error(ferr))
+							} else {
+								logger.Info("takeout session finished", zap.Int64("takeout_id", takeoutID))
+							}
+						}()
+					}
+				}
+
+				return b.Run(cctx)
+			})
+			return err, nil
+		}()
+		if fatalErr != nil {
+			return fatalErr
+		}
 		if ctx.Err() != nil {
 			// Clean shutdown (Ctrl-C / SIGTERM), not a failure.
 			return nil

@@ -24,18 +24,33 @@ type SyncFunc func(ctx context.Context, full bool) (int, error)
 // AccountFunc returns the currently signed-in account; it errors when not signed in.
 type AccountFunc func(ctx context.Context) (userID int64, username string, dc int, err error)
 
-var (
-	// syncDialogsFunc is injected by the assembly layer; when nil, /sync reports "not wired".
-	syncDialogsFunc SyncFunc
-	// accountFunc is injected by the assembly layer; when nil, /show_config shows "not signed in".
-	accountFunc AccountFunc
-)
-
 // SetSync injects the /sync implementation.
-func (b *Bot) SetSync(fn SyncFunc) { syncDialogsFunc = fn }
+func (b *Bot) SetSync(fn SyncFunc) {
+	b.depMu.Lock()
+	b.syncDialogs = fn
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getSync() SyncFunc {
+	b.depMu.RLock()
+	fn := b.syncDialogs
+	b.depMu.RUnlock()
+	return fn
+}
 
 // SetAccount injects the account lookup implementation.
-func (b *Bot) SetAccount(fn AccountFunc) { accountFunc = fn }
+func (b *Bot) SetAccount(fn AccountFunc) {
+	b.depMu.Lock()
+	b.account = fn
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getAccount() AccountFunc {
+	b.depMu.RLock()
+	fn := b.account
+	b.depMu.RUnlock()
+	return fn
+}
 
 func init() {
 	// The command dispatcher lives in handlers.go; this only attaches this file's implementation.
@@ -251,10 +266,11 @@ func (b *Bot) showConfigText(ctx context.Context) string {
 
 // accountStatus returns "signed in (user id/username)" or "not signed in".
 func (b *Bot) accountStatus(ctx context.Context) string {
-	if accountFunc == nil {
+	accountFn := b.getAccount()
+	if accountFn == nil {
 		return "not signed in (account lookup not wired)"
 	}
-	id, username, dc, err := accountFunc(ctx)
+	id, username, dc, err := accountFn(ctx)
 	if err != nil {
 		return "not signed in: " + b.translate(err)
 	}
@@ -294,7 +310,8 @@ func (b *Bot) cmdSync(ctx context.Context, msg *models.Message) error {
 		_, err := b.sendText(ctx, msg.Chat.ID, "Not allowed: /sync is admin only.")
 		return err
 	}
-	if syncDialogsFunc == nil {
+	syncFn := b.getSync()
+	if syncFn == nil {
 		_, err := b.sendText(ctx, msg.Chat.ID, "Sync not wired: this process has no MTProto client.")
 		return err
 	}
@@ -302,7 +319,7 @@ func (b *Bot) cmdSync(ctx context.Context, msg *models.Message) error {
 	if err != nil {
 		return err
 	}
-	n, serr := syncDialogsFunc(ctx, true)
+	n, serr := syncFn(ctx, true)
 	if serr != nil {
 		_, werr := b.sendText(ctx, msg.Chat.ID, "Sync failed: "+b.translate(serr))
 		return werr
@@ -323,11 +340,12 @@ func (b *Bot) cmdLoginLogout(ctx context.Context, msg *models.Message, cmd strin
 	if cmd == "logout" {
 		// Stop a wizard in progress so no login state outlives the logout.
 		b.login.clear(msg.Chat.ID)
-		if b.logout == nil {
+		logoutFn := b.getLogout()
+		if logoutFn == nil {
 			_, err := b.sendText(ctx, msg.Chat.ID, "Logout not wired: this process cannot delete the session file.")
 			return err
 		}
-		if lerr := b.logout(ctx); lerr != nil {
+		if lerr := logoutFn(ctx); lerr != nil {
 			_, err := b.sendText(ctx, msg.Chat.ID, "Failed to delete the session: "+b.translate(lerr))
 			return err
 		}

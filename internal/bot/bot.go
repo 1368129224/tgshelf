@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tgbot "github.com/go-telegram/bot"
@@ -51,15 +52,22 @@ type Bot struct {
 	tasks  *Manager   // manager.go
 	now    func() time.Time
 
+	// depMu protects mutable runtime callbacks swapped on MTProto reconnects.
+	depMu sync.RWMutex
+
 	download DownloadFunc
 	// logout is the /logout implementation; when nil, /logout only reports "not wired".
 	logout LogoutFunc
+	// syncDialogs is the /sync implementation; when nil, /sync reports "not wired".
+	syncDialogs SyncFunc
+	// account is the account lookup implementation; when nil, /show_config shows "not signed in".
+	account AccountFunc
 
 	// searchMedia is the /search implementation (injected via SetSearchMedia); searchStore caches
 	// the media items of one search run behind a "search:<id>" link. When nil, /search reports
 	// "not wired".
-	searchMedia  SearchMediaFunc
-	searchStore  *SearchStore
+	searchMedia SearchMediaFunc
+	searchStore *SearchStore
 
 	// textHandlers / callbackHandlers are the dispatch entry points registered on the real poller
 	// in Run, or driven directly by a test fake.
@@ -72,21 +80,40 @@ type Bot struct {
 // SetDownload injects the download executor (called by the assembly layer; without it download
 // tasks end with an explicit error).
 func (b *Bot) SetDownload(fn DownloadFunc) {
+	b.depMu.Lock()
 	b.download = fn
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getDownload() DownloadFunc {
+	b.depMu.RLock()
+	fn := b.download
+	b.depMu.RUnlock()
+	return fn
 }
 
 // LogoutFunc is the /logout implementation (the assembly layer deletes the session file).
 type LogoutFunc func(ctx context.Context) error
 
 // SetLoginAPI injects the login RPC getter (logging in is itself how authorization is obtained,
-// so a getter is injected instead of an instance).
+// so a getter is injected instead of an instance). Updates the existing wizard in place so an
+// in-progress /login session survives MTProto reconnects.
 func (b *Bot) SetLoginAPI(getAPI LoginAPIGetter) {
-	b.login = newLoginWizard(getAPI, b.logger)
+	b.login.setGetAPI(getAPI)
 }
 
 // SetLogout injects the /logout implementation.
 func (b *Bot) SetLogout(fn LogoutFunc) {
+	b.depMu.Lock()
 	b.logout = fn
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getLogout() LogoutFunc {
+	b.depMu.RLock()
+	fn := b.logout
+	b.depMu.RUnlock()
+	return fn
 }
 
 // New builds a Bot from an injected BotAPI (unit test setup: api is a fake, zero network).

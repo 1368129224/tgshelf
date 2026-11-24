@@ -136,10 +136,25 @@ func (w *loginWizard) ActiveFor(chatID, userID int64) bool {
 	return err == nil && st.UserID == userID
 }
 
+// setGetAPI updates the lazy LoginAPI getter safely (e.g. across MTProto reconnects) without
+// discarding any active login wizard state.
+func (w *loginWizard) setGetAPI(getAPI LoginAPIGetter) {
+	w.mu.Lock()
+	w.getAPI = getAPI
+	w.mu.Unlock()
+}
+
+func (w *loginWizard) currentGetAPI() LoginAPIGetter {
+	w.mu.Lock()
+	fn := w.getAPI
+	w.mu.Unlock()
+	return fn
+}
+
 // Start registers a fresh PHONE-step state owned by userID and returns the first prompt for the
 // user. Sending the message is the caller's (Bot's) job; the wizard only produces text.
 func (w *loginWizard) Start(chatID, userID int64) (string, error) {
-	if w.getAPI == nil {
+	if w.currentGetAPI() == nil {
 		return "", errors.New("bot: login RPC not wired")
 	}
 	w.setState(chatID, LoginState{
@@ -158,10 +173,11 @@ func (w *loginWizard) Handle(ctx context.Context, chatID int64, text string) (st
 	if err != nil {
 		return "", err
 	}
-	if w.getAPI == nil {
+	getAPI := w.currentGetAPI()
+	if getAPI == nil {
 		return "", errors.New("bot: login RPC not wired")
 	}
-	api, err := w.getAPI(ctx)
+	api, err := getAPI(ctx)
 	if err != nil {
 		return "", err
 	}

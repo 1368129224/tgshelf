@@ -83,8 +83,17 @@ type SearchMediaFunc func(ctx context.Context, channelArg, query string, progres
 
 // SetSearchMedia wires the /search implementation and the shared result cache.
 func (b *Bot) SetSearchMedia(fn SearchMediaFunc, store *SearchStore) {
+	b.depMu.Lock()
 	b.searchMedia = fn
 	b.searchStore = store
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getSearchMedia() (SearchMediaFunc, *SearchStore) {
+	b.depMu.RLock()
+	fn, store := b.searchMedia, b.searchStore
+	b.depMu.RUnlock()
+	return fn, store
 }
 
 // searchUsageText is the reply when /search is malformed.
@@ -100,7 +109,8 @@ func (b *Bot) onSearchCommand(ctx context.Context, msg *models.Message) error {
 		return nil
 	}
 	chatID := msg.Chat.ID
-	if b.searchMedia == nil || b.searchStore == nil {
+	searchFn, searchStore := b.getSearchMedia()
+	if searchFn == nil || searchStore == nil {
 		_, err := b.sendText(ctx, chatID, "Search is not available (not wired).")
 		return err
 	}
@@ -137,7 +147,12 @@ func (b *Bot) onSearchCommand(ctx context.Context, msg *models.Message) error {
 
 // runSearch performs the search and edits the placeholder into the confirmation panel.
 func (b *Bot) runSearch(ctx context.Context, chatID int64, placeholderID int, channelArg, query string) {
-	items, stats, err := b.searchMedia(ctx, channelArg, query, nil)
+	searchFn, searchStore := b.getSearchMedia()
+	if searchFn == nil || searchStore == nil {
+		b.editText(ctx, chatID, placeholderID, "❌ Search is not available (not wired).", nil)
+		return
+	}
+	items, stats, err := searchFn(ctx, channelArg, query, nil)
 	if err != nil {
 		b.logger.Warn("search failed",
 			zap.String("channel", channelArg),
@@ -156,7 +171,7 @@ func (b *Bot) runSearch(ctx context.Context, chatID int64, placeholderID int, ch
 	// Cache the result and register the synthetic link; the tag buttons reuse the normal
 	// select flow, which puts "search:<id>" into state.Task.Link untouched.
 	searchID := fmt.Sprintf("%d", b.now().UnixNano())
-	b.searchStore.Put(searchID, items)
+	searchStore.Put(searchID, items)
 	link := SearchLinkPrefix + searchID
 	shortID := b.links.Put(link)
 	kb, _ := buildTagKeyboard(b.cfg.Tags, shortID, 0)

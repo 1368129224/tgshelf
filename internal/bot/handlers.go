@@ -214,7 +214,7 @@ func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string)
 
 	work := func(wctx context.Context, t state.Task) error {
 		started := b.now()
-		fn := b.download
+		fn := b.getDownload()
 		b.logger.Info("download task started",
 			zap.String("task_id", taskID),
 			zap.String("link", link),
