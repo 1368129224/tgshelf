@@ -172,10 +172,19 @@ func peerIDsFromResolved(resolved *tg.ContactsResolvedPeer) (peerID int64, hash 
 		}
 		return peerID, 0, false
 	case *tg.PeerChat:
-		return p.ChatID, 0, true
+		return basicChatPeerID(p.ChatID), 0, true
 	default:
 		return 0, 0, false
 	}
+}
+
+// basicChatPeerID normalizes a Telegram basic-group chat ID to the negative Bot API convention
+// (-chatID) used by mediaPeerID so it never collides with positive User IDs in the entity cache.
+func basicChatPeerID(chatID int64) int64 {
+	if chatID > 0 {
+		return -chatID
+	}
+	return chatID
 }
 
 // Resolve turns a MessageRef into an InputPeer; the returned peer is the dialog the
@@ -384,7 +393,7 @@ func (r *PeerResolver) peerCacheDialogsPage(dialogs tg.MessagesDialogsClass) int
 			r.peerSave(PeerIDFromChannelID(c.ID), peerKindChannel, c.AccessHash, "", c.Title)
 			count++
 		case *tg.Chat:
-			r.peerSave(c.ID, peerKindChat, 0, "", c.Title)
+			r.peerSave(basicChatPeerID(c.ID), peerKindChat, 0, "", c.Title)
 			count++
 		}
 	}
@@ -398,54 +407,82 @@ func (r *PeerResolver) peerCacheDialogsPage(dialogs tg.MessagesDialogsClass) int
 }
 
 // peerNextOffset takes the last dialog of a page and builds the OffsetDate /
-// OffsetID / OffsetPeer of the next page; it returns hasMore=false for an empty page
-// or one that is not full.
+// OffsetID / OffsetPeer of the next page; it returns hasMore=false for a full
+// MessagesDialogs response, an empty page, or one that is not full.
 func peerNextOffset(dialogs tg.MessagesDialogsClass) (date, id int, peer tg.InputPeerClass, hasMore bool) {
-	var (
-		dialogsList []tg.DialogClass
-		messages    []tg.MessageClass
-		count       int
-	)
-	switch d := dialogs.(type) {
-	case *tg.MessagesDialogs:
-		dialogsList, messages = d.Dialogs, d.Messages
-	case *tg.MessagesDialogsSlice:
-		dialogsList, messages, count = d.Dialogs, d.Messages, d.Count
-	default:
+	d, ok := dialogs.(*tg.MessagesDialogsSlice)
+	if !ok {
+		// *tg.MessagesDialogs means the server returned all dialogs in one response.
 		return 0, 0, nil, false
 	}
-	if len(dialogsList) == 0 {
+	dialogsList := d.Dialogs
+	if len(dialogsList) == 0 || len(dialogsList) < 100 {
+		// Telegram convention: a page that is not full (< 100 entries) is the last one.
 		return 0, 0, nil, false
 	}
-	// Telegram convention: a page that is not full (< 100 entries) is the last one.
-	if len(dialogsList) < 100 {
-		return 0, 0, nil, false
-	}
-	_ = count // MessagesDialogs (the full form) has no count field; judge by page size
 	last := dialogsList[len(dialogsList)-1]
 	dlg, is := last.(*tg.Dialog)
 	if !is || dlg.Peer == nil {
 		return 0, 0, nil, false
 	}
-	// OffsetID / OffsetDate come from the newest message of the last dialog.
-	for i := len(messages) - 1; i >= 0; i-- {
-		if msg, isMsg := messages[i].(*tg.Message); isMsg {
-			date = msg.Date
-			id = msg.ID
+
+	// Build AccessHash lookup maps from this page so OffsetPeer carries a valid AccessHash.
+	channelHashes := make(map[int64]int64, len(d.Chats))
+	for _, ch := range d.Chats {
+		if c, isCh := ch.(*tg.Channel); isCh {
+			channelHashes[c.ID] = c.AccessHash
+		}
+	}
+	userHashes := make(map[int64]int64, len(d.Users))
+	for _, u := range d.Users {
+		if usr, isU := u.(*tg.User); isU {
+			userHashes[usr.ID] = usr.AccessHash
+		}
+	}
+
+	// OffsetID / OffsetDate come from the TopMessage of the last dialog (matching both
+	// *tg.Message and *tg.MessageService); fall back to the last message in the slice.
+	var fallbackDate, fallbackID int
+	for i := len(d.Messages) - 1; i >= 0; i-- {
+		var msgID, msgDate int
+		switch m := d.Messages[i].(type) {
+		case *tg.Message:
+			msgID, msgDate = m.ID, m.Date
+		case *tg.MessageService:
+			msgID, msgDate = m.ID, m.Date
+		default:
+			continue
+		}
+		if fallbackID == 0 {
+			fallbackID, fallbackDate = msgID, msgDate
+		}
+		if msgID == dlg.TopMessage {
+			id, date = msgID, msgDate
 			break
 		}
 	}
-	peer = peerInputFromPeerClass(dlg.Peer)
+	if id == 0 {
+		id, date = fallbackID, fallbackDate
+	}
+
+	peer = peerInputFromPeerClass(dlg.Peer, channelHashes, userHashes)
 	return date, id, peer, true
 }
 
-// peerInputFromPeerClass converts a PeerClass into the InputPeerClass used for paging.
-func peerInputFromPeerClass(p tg.PeerClass) tg.InputPeerClass {
+// peerInputFromPeerClass converts a PeerClass into the InputPeerClass used for paging,
+// populating AccessHash from the page's Chats/Users maps.
+func peerInputFromPeerClass(p tg.PeerClass, channelHashes, userHashes map[int64]int64) tg.InputPeerClass {
 	switch pp := p.(type) {
 	case *tg.PeerChannel:
-		return &tg.InputPeerChannel{ChannelID: pp.ChannelID}
+		return &tg.InputPeerChannel{
+			ChannelID:  pp.ChannelID,
+			AccessHash: channelHashes[pp.ChannelID],
+		}
 	case *tg.PeerUser:
-		return &tg.InputPeerUser{UserID: pp.UserID}
+		return &tg.InputPeerUser{
+			UserID:     pp.UserID,
+			AccessHash: userHashes[pp.UserID],
+		}
 	case *tg.PeerChat:
 		return &tg.InputPeerChat{ChatID: pp.ChatID}
 	default:
