@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting (gofmt)
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test (race)
+        run: go test -race ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          args: ./...
+
+      - name: Static binary build & smoke check
+        run: |
+          CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o bin/tgshelf ./cmd/tgshelf
+          ./bin/tgshelf -h >/dev/null
+          SIZE=$(stat -c%s bin/tgshelf)
+          echo "binary size: $SIZE bytes ($(numfmt --to=iec "$SIZE"))"
+          if [ "$SIZE" -gt 10485760 ]; then
+            echo "::warning::binary size $SIZE bytes exceeds 10MB"
+          fi
+
+      - name: Verify Dockerfile build
+        run: docker build -f deploy/Dockerfile -t tgshelf:ci .
