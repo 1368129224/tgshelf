@@ -18,8 +18,8 @@ English | <a href="README_zh.md">简体中文</a>
 - **Albums, private channels, discussion groups** — expanded and resolved transparently.
 - **Keyword search & batch download** — `/search @channel keyword` finds photo/video messages
   server-side (no full-history scan), previews the hit count and total size, then downloads them all.
-- **Readable failures** — `FLOOD_WAIT`, `FILE_REFERENCE_EXPIRED`, `ENOSPC` … become Chinese explanations
-  instead of raw codes.
+- **Readable failures** — `FLOOD_WAIT`, `FILE_REFERENCE_EXPIRED`, `ENOSPC` … become clear, actionable
+  explanations instead of raw codes.
 - **Live progress** — one edited message per task (bar, percentage, speed, ETA), at most one edit per 3 s.
 - **No babysitting** — tasks survive restarts (`/status`, `/cancel`, retry), single-instance lock,
   path-traversal-proof filenames, secrets redacted from logs.
@@ -78,8 +78,8 @@ docker compose up -d --build # update
 | `/start`, `/help` | allowed users | usage summary |
 | `/search <channel> <keyword>` | allowed users | search a channel's photo/video messages by keyword (server-side `messages.search`), preview the hit count and total size, then batch download via a tag |
 | `/status` | allowed users | queued and running tasks (admins see every task) |
-| `/cancel <id>` / `/cancel all` | allowed users | cancel a task; also exits an in-progress login wizard |
-| `/show_config` (alias `/config`) | allowed users | current configuration with secrets masked |
+| `/cancel <id>` / `/cancel all` (`/cancel_all`) | allowed users | cancel a task; also exits an in-progress login wizard |
+| `/show_config` (alias `/config`) | **admin** | current configuration with secrets masked |
 | `/sync` | **admin** | refresh the dialog/`access_hash` cache (needed for private channels) |
 | `/login` | **admin** | phone → code → 2FA login wizard |
 | `/logout` | **admin** | delete the session file (restart required; revoke the device in Telegram separately) |

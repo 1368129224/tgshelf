@@ -65,6 +65,7 @@ func run(args []string) error {
 		}
 		return fmt.Errorf("parse command line arguments: %w", err)
 	}
+	*configPath = resolveConfigPath(fset, *configPath)
 
 	if *healthMode {
 		return runHealthCheck(*configPath)
@@ -176,6 +177,27 @@ func run(args []string) error {
 	}
 
 	return nil
+}
+
+// resolveConfigPath applies CLI precedence: explicit -config flag > TGSHELF_CONFIG
+// (or legacy TDFB_CONFIG) environment variable > default "tgshelf_config.toml".
+func resolveConfigPath(fset *flag.FlagSet, flagVal string) string {
+	explicit := false
+	fset.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			explicit = true
+		}
+	})
+	if explicit {
+		return flagVal
+	}
+	if envPath := os.Getenv("TGSHELF_CONFIG"); envPath != "" {
+		return envPath
+	}
+	if legacyPath := os.Getenv("TDFB_CONFIG"); legacyPath != "" {
+		return legacyPath
+	}
+	return flagVal
 }
 
 // loadConfig loads the config file; when it does not exist (ErrNotExist) a commented

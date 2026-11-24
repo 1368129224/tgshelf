@@ -175,7 +175,7 @@ lang_pack = ""
 max_concurrency = 3
 # User IDs allowed to use the bot; empty = no restriction (public deployment is not recommended)
 allowed_user_ids = []
-# Admin user IDs (may run /login /logout /sync)
+# Admin user IDs (may run /login /logout /sync /show_config)
 admin_user_ids = []
 
 [download]
