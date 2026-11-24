@@ -107,7 +107,7 @@ func EnsureDir(path string, perm os.FileMode) error {
 	// Explicit Chmod so umask cannot shrink the intended permission; skip EPERM on
 	// pre-existing directories (e.g. Docker bind mounts owned by another UID).
 	if info.Mode().Perm() != perm {
-		if err = os.Chmod(path, perm); err != nil && !(existed && errors.Is(err, os.ErrPermission)) {
+		if err = os.Chmod(path, perm); err != nil && (!existed || !errors.Is(err, os.ErrPermission)) {
 			return fmt.Errorf("fs.EnsureDir: chmod %q: %w", path, err)
 		}
 	}

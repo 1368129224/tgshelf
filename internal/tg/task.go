@@ -592,7 +592,7 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		res.Err = derr
 		res.Bytes = plan.CompletedBytes()
 		if cerr != nil {
-			res.Err = fmt.Errorf("%w (closing part file: %v)", res.Err, cerr)
+			res.Err = fmt.Errorf("%w (closing part file: %w)", res.Err, cerr)
 		}
 		return res
 	}

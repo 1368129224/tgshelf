@@ -201,7 +201,7 @@ func (f *loginFlow) sendCode(ctx context.Context, phone string) (string, error) 
 		// AUTH_RESTART: the local auth key is dead, retrying is pointless, return
 		// recovery guidance right away.
 		if isAuthRestart(err) {
-			return "", fmt.Errorf("%w (original error: %s)", ErrAuthRestart, err)
+			return "", fmt.Errorf("%w (original error: %w)", ErrAuthRestart, err)
 		}
 
 		targetDC, ok := migrateTarget(err)

@@ -22,6 +22,11 @@ linters:
       - path: "deps_check\\.go$"
         linters:
           - unused
+      # Unit tests intentionally use 0644/0755 temp fixtures, deterministic math/rand,
+      # and placeholder token strings.
+      - path: "_test\\.go$"
+        linters:
+          - gosec
 
 issues:
   max-issues-per-linter: 50

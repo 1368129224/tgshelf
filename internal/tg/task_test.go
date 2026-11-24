@@ -90,13 +90,13 @@ func TestBestThreadsTable(t *testing.T) {
 		{5<<20 - 1, 8, 2},
 		{5 << 20, 8, 4}, // ==5MiB -> the <20MiB tier
 		{20<<20 - 1, 8, 4},
-		{20 << 20, 8, 8},   // ==20MiB -> 8
-		{50 << 20, 8, 8},   // >=50MiB -> 8
-		{100 << 20, 4, 4},  // truncated by max=4
-		{100 << 20, 1, 1},  // truncated by max=1
-		{100 << 20, 0, 1},  // max=0 fallback
-		{100 << 20, -3, 1}, // max<0 fallback
-		{0, 0, 1},          // both zero fallback
+		{20 << 20, 8, 8},                        // ==20MiB -> 8
+		{50 << 20, 8, 8},                        // >=50MiB -> 8
+		{100 << 20, 4, 4},                       // truncated by max=4
+		{100 << 20, 1, 1},                       // truncated by max=1
+		{100 << 20, 0, defaultDownloadThreads},  // max=0 fallback
+		{100 << 20, -3, defaultDownloadThreads}, // max<0 fallback
+		{0, 0, 1},                               // both zero fallback
 	}
 	for _, c := range cases {
 		if got := bestThreads(c.size, c.max); got != c.want {

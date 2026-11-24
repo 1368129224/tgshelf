@@ -118,7 +118,7 @@ func httpDialer(u *url.URL) (func(context.Context, string, string) (net.Conn, er
 		if err != nil {
 			return nil, fmt.Errorf("dial proxy %s: %w", proxyAddr, err)
 		}
-		var conn net.Conn = rawConn
+		conn := net.Conn(rawConn)
 		if useTLS {
 			tlsConn := tls.Client(rawConn, &tls.Config{
 				ServerName: host,

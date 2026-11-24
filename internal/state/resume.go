@@ -157,7 +157,7 @@ func Open(root, relPath string, meta ResumeMeta, opts ...Option) (*Session, erro
 
 	// 1. try to load an existing .state and run the three checks.
 	var loaded *Bitmap
-	b, err := os.ReadFile(statePath)
+	b, err := os.ReadFile(statePath) // #nosec G304 -- statePath is confined inside rootDir/.parts
 	switch {
 	case err == nil:
 		loaded, s.resetReason = loadAndValidate(b, meta, numChunks)
@@ -175,7 +175,7 @@ func Open(root, relPath string, meta ResumeMeta, opts ...Option) (*Session, erro
 	// 3. open the part file: keep existing data if reusable, else truncate and preallocate.
 	var f *os.File
 	if loaded != nil {
-		f, err = os.OpenFile(partPath, os.O_RDWR, resumeFilePerm)
+		f, err = os.OpenFile(partPath, os.O_RDWR, resumeFilePerm) // #nosec G304 -- partPath is confined inside rootDir/.parts
 		if err != nil {
 			return nil, fmt.Errorf("resume: open part %q: %w", partPath, err)
 		}
@@ -183,7 +183,7 @@ func Open(root, relPath string, meta ResumeMeta, opts ...Option) (*Session, erro
 		// reuse failed or first download: delete old files and start over (reason already set).
 		_ = os.Remove(statePath)
 		_ = os.Remove(partPath)
-		f, err = os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, resumeFilePerm)
+		f, err = os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, resumeFilePerm) // #nosec G304 -- partPath is confined inside rootDir/.parts
 		if err != nil {
 			return nil, fmt.Errorf("resume: create part %q: %w", partPath, err)
 		}

@@ -99,7 +99,7 @@ func acquireLock(ctx context.Context, path string, opts LockOptions) (*Lock, err
 
 	// Open or create the lock file; keep the file to preserve flock semantics (inode
 	// stability).
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- lock path comes from local configuration
 	if err != nil {
 		return nil, fmt.Errorf("fs.AcquireLock: open lock file %q: %w", path, err)
 	}

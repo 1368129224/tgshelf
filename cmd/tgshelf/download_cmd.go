@@ -32,7 +32,7 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- non-cryptographic checksum for CLI output
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -339,12 +339,12 @@ func downloadRelPath(tpl string, item tg.MediaItem, tag string) (string, error) 
 
 // md5File computes the file MD5 (lowercase hex).
 func md5File(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is the verified output file just downloaded
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	h := md5.New()
+	h := md5.New() // #nosec G401 -- non-cryptographic checksum for CLI output
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
@@ -817,7 +817,7 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 		res.err = derr
 		res.bytes = prevDone.Load()
 		if cerr != nil {
-			res.err = fmt.Errorf("%w (closing part file: %v)", res.err, cerr)
+			res.err = fmt.Errorf("%w (closing part file: %w)", res.err, cerr)
 		}
 		return res
 	}

@@ -13,7 +13,7 @@ var (
 	osCloseFile = func(f *os.File) error { return f.Close() }
 	osChmod     = func(name string, mode os.FileMode) error { return os.Chmod(name, mode) }
 	osRename    = func(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
-	osOpenDir   = func(dir string) (*os.File, error) { return os.Open(dir) }
+	osOpenDir   = func(dir string) (*os.File, error) { return os.Open(dir) } // #nosec G304 -- caller-validated directory path for fsync
 )
 
 // AtomicWriteFile atomically writes data to path with permission perm.
@@ -112,7 +112,7 @@ func CreateExclusive(dir, base, ext string) (path string, f *os.File, err error)
 			candidate = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
 		}
 
-		f, err = os.OpenFile(candidate, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		f, err = os.OpenFile(candidate, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- candidate path constructed under caller-validated dir
 		if err == nil {
 			return candidate, f, nil
 		}

@@ -177,6 +177,10 @@ func TestDownloadRefreshExpiredOnceThenSucceed(t *testing.T) {
 // Asserts: exactly 3 fn calls, errors.Is(err, ErrFileRefExpired), and the error message
 // carries the refresh count.
 func TestDownloadRefreshExhaustedFailsWholeFile(t *testing.T) {
+	origCooldown := refreshCooldown
+	refreshCooldown = 0
+	t.Cleanup(func() { refreshCooldown = origCooldown })
+
 	size := int64(2 * testChunkSize)
 	seedData := make([]byte, size)
 	rpc := &refRPC{fakeRPC: fakeRPC{seedData: seedData}}
@@ -326,6 +330,30 @@ func TestRefresherLimitAfterThreeCalls(t *testing.T) {
 	}
 	if got := calls.Load(); got != 3 {
 		t.Fatalf("RefreshFunc calls = %d, want 3", got)
+	}
+}
+
+// TestRefresherCooldownEnforced: a second refresh inside the cooldown window is rejected
+// without calling RefreshFunc again, wrapping both ErrRefreshTooFrequent and ErrFileRefExpired.
+func TestRefresherCooldownEnforced(t *testing.T) {
+	item := newTestItem(100)
+	var calls atomic.Int64
+	r := NewRefresher(func(ctx context.Context) (tg.InputFileLocationClass, error) {
+		n := calls.Add(1)
+		return locWithRef(item, []byte{byte(n)}), nil
+	}, zap.NewNop())
+	r.cooldown = time.Hour
+	r.staleWait = 0
+
+	if _, err := r.Refresh(context.Background()); err != nil {
+		t.Fatalf("first refresh failed: %v", err)
+	}
+	_, err := r.Refresh(context.Background())
+	if !errors.Is(err, ErrRefreshTooFrequent) || !errors.Is(err, ErrFileRefExpired) {
+		t.Fatalf("second refresh within cooldown should match ErrRefreshTooFrequent and ErrFileRefExpired, got %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("RefreshFunc calls = %d, want 1", got)
 	}
 }
 

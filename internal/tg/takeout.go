@@ -52,9 +52,12 @@ func InitTakeoutSession(ctx context.Context, api *tg.Client, fileMaxSizeMB int32
 // Per Telegram's MTProto specification, account.finishTakeoutSession must be invoked inside
 // invokeWithTakeout{takeout_id}.
 func FinishTakeoutSession(ctx context.Context, api *tg.Client, takeoutID int64) error {
+	if api == nil {
+		return fmt.Errorf("tg: finish takeout session: api client is nil")
+	}
 	req := &tg.AccountFinishTakeoutSessionRequest{Success: true}
 	req.SetFlags()
-	wrapped := tg.NewClient(NewTakeoutInvoker(api, takeoutID))
+	wrapped := tg.NewClient(NewTakeoutInvoker(api.Invoker(), takeoutID))
 	if _, err := wrapped.AccountFinishTakeoutSession(ctx, req); err != nil {
 		// Errors such as SESSION_PASSWORD_NEEDED must not be swallowed, but "takeout is
 		// already gone" style errors can be ignored.

@@ -567,7 +567,7 @@ func (b *Bot) onCancelTask(ctx context.Context, cbq *models.CallbackQuery, cb Ca
 	}
 
 	msg := "Cancelling…"
-	var markup *models.InlineKeyboardMarkup
+	var markup models.ReplyMarkup
 	if prev == state.StatePending {
 		msg = "Cancelled (it was still queued and never started)"
 		markup = emptyMarkup()

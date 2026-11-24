@@ -105,16 +105,6 @@ func (w *loginWizard) state(chatID int64) (LoginState, error) {
 	return st, nil
 }
 
-// setState writes the state and refreshes its TTL.
-func (w *loginWizard) setState(chatID int64, st LoginState) {
-	if st.ExpiresAt.IsZero() {
-		st.ExpiresAt = time.Now().Add(loginStateTTL)
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.states[chatID] = st
-}
-
 // advanceState updates the chat's wizard state only if it still exists with expectedGen.
 // This prevents an in-flight RPC from resurrecting a wizard that was cancelled or restarted.
 func (w *loginWizard) advanceState(chatID int64, expectedGen uint64, st LoginState) bool {

@@ -37,7 +37,7 @@ func NewRotateWriter(filename string, maxBytes int64, maxBackups int) (*RotateWr
 	}
 
 	dir := filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
 

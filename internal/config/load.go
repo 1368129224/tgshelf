@@ -19,7 +19,7 @@ var ErrNotExist = errors.New("config file does not exist")
 // The new name wins; when both are set the new one is authoritative.
 const (
 	legacyEnvConfig   = "TDFB_CONFIG"
-	legacyEnvBotToken = "TDFB_BOT_TOKEN"
+	legacyEnvBotToken = "TDFB_BOT_TOKEN" // #nosec G101 -- env var name, not a credential
 )
 
 // getenvCompat reads the new variable name first and falls back to the legacy one when
@@ -54,7 +54,7 @@ func Load(path string) (*Config, error) {
 	cfg := defaults()
 
 	// read the TOML file
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- config path comes from CLI flag or TGSHELF_CONFIG env var
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %s", ErrNotExist, path)
@@ -208,7 +208,7 @@ cache_dialogs_hours = 6
 // The comments come from a hard-coded template string and never pass through toml.Marshal,
 // so they are kept intact.
 func WriteDefault(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- config path comes from CLI flag
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("config file already exists at %q, refusing to overwrite", path)
