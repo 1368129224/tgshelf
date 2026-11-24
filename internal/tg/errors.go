@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net"
 	"os"
 	"strings"
@@ -115,6 +114,10 @@ func Translate(err error) string {
 	if errors.Is(err, ErrChannelPrivate) {
 		return ErrChannelPrivate.Error()
 	}
+	// Check ErrRefreshTooFrequent before ErrFileRefExpired since it wraps ErrFileRefExpired.
+	if errors.Is(err, ErrRefreshTooFrequent) {
+		return ErrRefreshTooFrequent.Error()
+	}
 	if errors.Is(err, ErrFileRefExpired) {
 		return ErrFileRefExpired.Error()
 	}
@@ -135,6 +138,18 @@ func Translate(err error) string {
 	}
 	if errors.Is(err, ErrMsgIDInvalid) {
 		return ErrMsgIDInvalid.Error()
+	}
+	if errors.Is(err, ErrDiskFull) {
+		return ErrDiskFull.Error()
+	}
+	if errors.Is(err, ErrDirNotFound) {
+		return ErrDirNotFound.Error()
+	}
+	if errors.Is(err, ErrTimeout) {
+		return ErrTimeout.Error()
+	}
+	if errors.Is(err, ErrConnRefused) {
+		return ErrConnRefused.Error()
 	}
 
 	// Layer 2: context errors.
@@ -227,12 +242,6 @@ func translateFS(err error) (string, bool) {
 	}
 	if errors.Is(err, os.ErrNotExist) {
 		return ErrDirNotFound.Error(), true
-	}
-	// io/fs PathError is already covered through os.Err*; *fs.PathError adds no information.
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		// The inner error of a PathError did not match a known type, fall back to raw text.
-		return "", false
 	}
 	// String fallback only when every type check failed (lowest priority allowed by the contract).
 	msg := err.Error()

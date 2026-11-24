@@ -13,7 +13,9 @@ package tg
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -106,7 +108,7 @@ func ParseKinds(names []string) (map[MediaKind]bool, error) {
 	return m, nil
 }
 
-// ParseSize parses a size string such as "10MB"/"500KiB"/"1073741824" into a byte count
+// ParseSize parses a size string such as "10MB"/"1.5GB"/"500KiB"/"1073741824" into a byte count
 // (base 1024). Supported units: B (default), KB/KiB, MB/MiB, GB/GiB; a bare number means bytes.
 func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
@@ -121,9 +123,8 @@ func ParseSize(s string) (int64, error) {
 		i++
 	}
 	numStr, unit := s[:i], strings.ToUpper(strings.TrimSpace(s[i:]))
-	num, err := parsePositiveInt(numStr)
-	if err != nil {
-		return 0, fmt.Errorf("filter: cannot parse size %q: %w", s, err)
+	if numStr == "" {
+		return 0, fmt.Errorf("filter: cannot parse size %q", s)
 	}
 	var mult int64
 	switch unit {
@@ -137,6 +138,24 @@ func ParseSize(s string) (int64, error) {
 		mult = 1 << 30
 	default:
 		return 0, fmt.Errorf("filter: unknown size unit %q (supported: B/KB/MB/GB)", unit)
+	}
+	if strings.Contains(numStr, ".") {
+		f, err := strconv.ParseFloat(numStr, 64)
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+			return 0, fmt.Errorf("filter: cannot parse size %q", s)
+		}
+		bytes := f * float64(mult)
+		if math.IsInf(bytes, 0) || bytes > float64(math.MaxInt64) {
+			return 0, fmt.Errorf("filter: size %q overflows int64", s)
+		}
+		return int64(math.Round(bytes)), nil
+	}
+	num, err := parsePositiveInt(numStr)
+	if err != nil {
+		return 0, fmt.Errorf("filter: cannot parse size %q: %w", s, err)
+	}
+	if num > math.MaxInt64/mult {
+		return 0, fmt.Errorf("filter: size %q overflows int64", s)
 	}
 	return num * mult, nil
 }
@@ -154,8 +173,8 @@ func isAllDigits(s string) bool {
 }
 
 func parsePositiveInt(s string) (int64, error) {
-	var n int64
-	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
 		return 0, err
 	}
 	if n < 0 {

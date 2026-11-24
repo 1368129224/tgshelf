@@ -83,7 +83,7 @@ const taskChunkSize int64 = 1 << 20
 // defaultDownloadThreads (4).
 func bestThreads(size int64, max int) int {
 	if max <= 0 {
-		return 1
+		max = defaultDownloadThreads
 	}
 	switch {
 	case size < 1<<20:
@@ -382,18 +382,26 @@ func (r *TaskRunner) Run(ctx context.Context, taskID string, items []TaskItem, p
 	// Task-level state machine: RUNNING -> terminal state (validated explicitly; an illegal
 	// transition is reported as an error).
 	// Priority: any cancellation -> CANCELLED; otherwise any failure -> FAILED; otherwise DONE.
-	if cancelled.Load() {
+	if cancelled.Load() || ctx.Err() != nil {
 		if err := validateTransitionLocal(state.StateRunning, state.StateCancelled); err != nil {
 			return nil, fmt.Errorf("tg: illegal state transition for task %s: %w", taskID, err)
 		}
+		cause := ctx.Err()
+		if cause == nil {
+			cause = context.Canceled
+		}
 		res.State = state.StateCancelled
-		res.Err = fmt.Errorf("tg: task %s canceled: %w", taskID, context.Canceled)
+		res.Err = fmt.Errorf("tg: task %s canceled: %w", taskID, cause)
 	} else if failed.Load() > 0 {
 		if err := validateTransitionLocal(state.StateRunning, state.StateFailed); err != nil {
 			return nil, fmt.Errorf("tg: illegal state transition for task %s: %w", taskID, err)
 		}
 		res.State = state.StateFailed
-		res.Err = fmt.Errorf("tg: task %s partially failed: %d/%d succeeded", taskID, succeeded.Load(), len(items))
+		if firstErr != nil {
+			res.Err = fmt.Errorf("tg: task %s partially failed: %d/%d succeeded: %w", taskID, succeeded.Load(), len(items), firstErr)
+		} else {
+			res.Err = fmt.Errorf("tg: task %s partially failed: %d/%d succeeded", taskID, succeeded.Load(), len(items))
+		}
 	} else {
 		if err := validateTransitionLocal(state.StateRunning, state.StateDone); err != nil {
 			return nil, fmt.Errorf("tg: illegal state transition for task %s: %w", taskID, err)

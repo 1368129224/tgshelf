@@ -341,8 +341,15 @@ func (d *Downloader) finishChunk(
 	// (only the actual bytes are written); a short response on a middle chunk was already detected
 	// as errShortResponse in getOnce and retried by fetchChunk, so it never reaches here (the
 	// defensive branch stays: excess bytes are never written to disk).
-	if len(buf) > limit {
-		buf = buf[:limit]
+	maxWrite := int64(limit)
+	if rem := total - offset; rem < maxWrite {
+		maxWrite = rem
+	}
+	if maxWrite < 0 {
+		maxWrite = 0
+	}
+	if int64(len(buf)) > maxWrite {
+		buf = buf[:maxWrite]
 	}
 	if _, err := req.Writer.WriteAt(buf, offset); err != nil {
 		// Retrying a disk write is of limited use (a disk-state problem), so abort the whole
@@ -392,7 +399,14 @@ func (d *Downloader) fetchChunk(ctx context.Context, rpc getFileRPC, loc tg.Inpu
 	var lastErr error
 	for attempt := 0; attempt < chunkMaxRetries; attempt++ {
 		if attempt > 0 {
-			delay := d.backoff[attempt-1]
+			var delay time.Duration
+			if len(d.backoff) > 0 {
+				idx := attempt - 1
+				if idx >= len(d.backoff) {
+					idx = len(d.backoff) - 1
+				}
+				delay = d.backoff[idx]
+			}
 			if delay > 0 {
 				select {
 				case <-time.After(delay):

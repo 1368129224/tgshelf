@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,17 +98,16 @@ func ParseChannelArg(arg string) (MessageRef, error) {
 	s = strings.TrimPrefix(s, "@")
 
 	// t.me links (with or without scheme): reuse the link shapes but ignore the message id.
-	if i := strings.Index(s, "t.me/"); i >= 0 {
-		rest := s[i+len("t.me/"):]
+	if rest, ok := trimTmePrefix(s); ok {
 		seg := strings.Split(rest, "/")
 		switch {
 		case len(seg) >= 2 && seg[0] == "c":
 			// Private channel: t.me/c/<channelID>[/<msgID>].
-			cid, err := parsePosInt(seg[1])
+			cid, err := parsePosInt64(seg[1])
 			if err != nil {
 				return MessageRef{}, fmt.Errorf("%w: bad private channel id %q", ErrBadChannelArg, seg[1])
 			}
-			return MessageRef{Kind: RefPrivate, ChannelID: int64(cid)}, nil
+			return MessageRef{Kind: RefPrivate, ChannelID: cid}, nil
 		case len(seg) >= 1 && seg[0] != "":
 			u := seg[0]
 			if i := strings.Index(u, "?"); i >= 0 {
@@ -134,6 +134,27 @@ func ParseChannelArg(arg string) (MessageRef, error) {
 	return MessageRef{}, ErrBadChannelArg
 }
 
+func trimTmePrefix(s string) (string, bool) {
+	lower := strings.ToLower(s)
+	for _, prefix := range []string{"https://t.me/", "http://t.me/", "https://www.t.me/", "http://www.t.me/", "www.t.me/", "t.me/"} {
+		if strings.HasPrefix(lower, prefix) {
+			return s[len(prefix):], true
+		}
+	}
+	return "", false
+}
+
+func parsePosInt64(s string) (int64, error) {
+	if s == "" {
+		return 0, errors.New("empty integer")
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("not a positive int64: %q", s)
+	}
+	return v, nil
+}
+
 // parseChannelIDArg parses "-1001234567890" or "1234567890" into a raw channel id. The
 // negative form is the raw peer id of a private channel/supergroup and is the natural way to
 // paste one, so it is accepted and normalized to the positive channel id.
@@ -144,19 +165,19 @@ func parseChannelIDArg(s string) (int64, error) {
 		neg = true
 		body = body[1:]
 	}
-	v, err := parsePosInt(body)
+	v, err := parsePosInt64(body)
 	if err != nil {
 		return 0, err
 	}
 	if neg {
 		// "-1001234567890" is the peer id form (PeerIDFromChannelID output): recover the raw
 		// channel id. A bare negative id (a regular group) is not searchable here — reject it.
-		if cid, ok := ChannelIDFromPeerID(int64(-v)); ok {
+		if cid, ok := ChannelIDFromPeerID(-v); ok {
 			return cid, nil
 		}
 		return 0, fmt.Errorf("bad channel id %q: not a channel/supergroup peer id", s)
 	}
-	return int64(v), nil
+	return v, nil
 }
 
 // SearchChannel resolves the channel argument then runs the search. It is the entry point the
@@ -224,14 +245,21 @@ func (s *Searcher) SearchMedia(ctx context.Context, opts SearchOptions, progress
 			return nil, stats, fmt.Errorf("tg: messages search: %w", err)
 		}
 		msgs := pipelineAllMessages(resp)
-		if len(msgs) == 0 {
+		rawCount := len(msgs)
+		if rawCount == 0 {
 			break
 		}
+		prevLast := last
 
 		for _, mc := range msgs {
 			msg, ok := mc.(*tg.Message)
 			if !ok {
 				continue
+			}
+			// Advance the search cursor from search-hit message IDs (not expanded album members)
+			// so interleaved non-album hits are never skipped.
+			if msg.ID < last || last == 0 {
+				last = msg.ID
 			}
 			if _, dup := seen[msg.ID]; dup {
 				continue
@@ -249,9 +277,6 @@ func (s *Searcher) SearchMedia(ctx context.Context, opts SearchOptions, progress
 						continue
 					}
 					seen[am.ID] = struct{}{}
-					if am.ID < last || last == 0 {
-						last = am.ID
-					}
 					it, mok := MediaFromMessage(am)
 					if !mok {
 						continue
@@ -270,9 +295,6 @@ func (s *Searcher) SearchMedia(ctx context.Context, opts SearchOptions, progress
 				}
 			} else {
 				seen[msg.ID] = struct{}{}
-				if msg.ID < last || last == 0 {
-					last = msg.ID
-				}
 				it, mok := MediaFromMessage(msg)
 				if mok {
 					items = append(items, it)
@@ -291,12 +313,12 @@ func (s *Searcher) SearchMedia(ctx context.Context, opts SearchOptions, progress
 			}
 		}
 
-		if len(msgs) < searchPageLimit {
+		if rawCount < searchPageLimit {
 			break
 		}
 		// Page cursor: the search returns messages newest-first, so continue below the lowest id
-		// already seen. OffsetID=0 means "from the newest", so a zero cursor cannot advance.
-		if last == 0 {
+		// already seen. Stop if the cursor did not advance to prevent an infinite loop.
+		if last == 0 || (prevLast != 0 && last >= prevLast) {
 			break
 		}
 		select {
