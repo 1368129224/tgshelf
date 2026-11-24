@@ -27,26 +27,42 @@ func TestRedacter(t *testing.T) {
 		name      string
 		input     string
 		forbidden []string
+		want      string
 	}{
 		{
 			name:      "phone number redaction",
 			input:     "user phone is +8613800138000 and 13912345678",
 			forbidden: []string{"13800138000", "13912345678"},
+			want:      "user phone is +86138****8000 and 139****5678",
 		},
 		{
 			name:      "proxy password redaction",
 			input:     "connect via socks5://admin:SecretPass123@127.0.0.1:1080",
 			forbidden: []string{"admin:SecretPass123@"},
+			want:      "connect via socks5://***:***@127.0.0.1:1080",
 		},
 		{
 			name:      "bot token regex redaction",
 			input:     "got token 1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789 in log",
 			forbidden: []string{"1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"},
+			want:      "got token [REDACTED_BOT_TOKEN] in log",
+		},
+		{
+			name:      "bot token in Telegram API URL",
+			input:     "Post https://api.telegram.org/bot1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789/getMe: EOF",
+			forbidden: []string{"1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789"},
+			want:      "Post https://api.telegram.org/bot[REDACTED_BOT_TOKEN]/getMe: EOF",
+		},
+		{
+			name:  "numeric IDs preserved",
+			input: "channel=-1001234567890 doc_id=5123456789012345678 ts=1730000000000",
+			want:  "channel=-1001234567890 doc_id=5123456789012345678 ts=1730000000000",
 		},
 		{
 			name:      "injected exact secret redaction",
 			input:     fmt.Sprintf("token=%s, hash=%s", secretToken, secretHash),
 			forbidden: []string{secretToken, secretHash},
+			want:      "token=[REDACTED], hash=[REDACTED]",
 		},
 	}
 
@@ -57,6 +73,9 @@ func TestRedacter(t *testing.T) {
 				if strings.Contains(out, f) {
 					t.Fatalf("still contains sensitive data after redaction %q: %s", f, out)
 				}
+			}
+			if c.want != "" && out != c.want {
+				t.Fatalf("Redact(%q) = %q, want %q", c.input, out, c.want)
 			}
 		})
 	}
@@ -79,11 +98,13 @@ func TestRedactingCore(t *testing.T) {
 	logger.Info("user logged in",
 		zap.String("phone", secretPhone),
 		zap.String("token", secretToken),
+		zap.ByteString("raw_token", []byte("https://api.telegram.org/bot"+secretToken+"/getMe")),
+		zap.Strings("urls", []string{"socks5://u:p@127.0.0.1:1080", secretAPIHash}),
 		zap.Error(errors.New("bad hash: "+secretAPIHash)),
 	)
 
 	logOutput := buf.String()
-	for _, forbidden := range []string{secretPhone, secretToken, secretAPIHash} {
+	for _, forbidden := range []string{secretPhone, secretToken, secretAPIHash, "u:p@"} {
 		if strings.Contains(logOutput, forbidden) {
 			t.Fatalf("zap log output leaks sensitive data %q: %s", forbidden, logOutput)
 		}
