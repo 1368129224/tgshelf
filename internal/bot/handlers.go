@@ -521,12 +521,19 @@ func (b *Bot) onPage(ctx context.Context, cbq *models.CallbackQuery, cb Callback
 		return b.answerCallback(ctx, cbq, "Cannot identify this chat", true)
 	}
 	kb, _ := buildTagKeyboard(b.cfg.Tags, cb.ShortID, cb.Page)
-	// The text is rebuilt from the link looked up by short ID, so resend the whole message
-	// instead of only swapping the keyboard.
+	// Preserve the original message text (e.g. /search confirmation panels) so paging the tag
+	// keyboard does not overwrite search results with an internal "search:<id>" link.
+	text := ""
+	if cbq != nil && cbq.Message.Message != nil {
+		text = cbq.Message.Message.Text
+	}
+	if text == "" {
+		text = tagPromptText + link
+	}
 	if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{
 		ChatID:      chatID,
 		MessageID:   messageID,
-		Text:        tagPromptText + link,
+		Text:        text,
 		ReplyMarkup: kb,
 	}); err != nil {
 		b.logger.Debug("failed to rebuild the keyboard on page change", zap.Error(err))
