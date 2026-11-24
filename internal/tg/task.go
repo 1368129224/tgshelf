@@ -447,6 +447,7 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		res.State = state.StateFailed
 		return res
 	}
+	defer func() { _ = sess.Close() }()
 
 	// Pre-emptive flush: flush once before downloading so that .state definitely exists on
 	// failure/cancellation (the Session writes .state only on Flush; if a chunk failure happens
@@ -456,7 +457,6 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		res.State = state.StateFailed
 		return res
 	}
-	defer func() { _ = sess.Close() }()
 
 	// Bitmap wiring (constraint 8): build an independent copy from the Session bitmap snapshot and
 	// never hand sess.Done() directly to ChunkPlan (two locks protecting the same []byte would

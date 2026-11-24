@@ -182,6 +182,9 @@ func (d *Downloader) Download(ctx context.Context, req DownloadRequest) error {
 	doneBytes.Store(req.Plan.CompletedBytes())
 	total := req.Plan.Size
 
+	dlCtx, dlCancel := context.WithCancel(ctx)
+	defer dlCancel()
+
 	var (
 		abort    atomic.Bool // set once any chunk ultimately fails, stops dispatching new chunks
 		errMu    sync.Mutex
@@ -190,10 +193,12 @@ func (d *Downloader) Download(ctx context.Context, req DownloadRequest) error {
 
 	setErr := func(idx, offset int64, err error) {
 		errMu.Lock()
-		defer errMu.Unlock()
 		if firstErr == nil {
 			firstErr = fmt.Errorf("tg: chunk %d at offset %d failed: %w", idx, offset, asFileRefErr(err))
 		}
+		errMu.Unlock()
+		abort.Store(true)
+		dlCancel()
 	}
 
 	// File reference refresher: one per file (counters are isolated per file); when Refresh is nil
@@ -217,16 +222,15 @@ func (d *Downloader) Download(ctx context.Context, req DownloadRequest) error {
 			defer wg.Done()
 			for idx := range tasks {
 				// ctx already canceled or a failure already happened: dispatch no new chunk.
-				if ctx.Err() != nil || abort.Load() {
+				if dlCtx.Err() != nil || abort.Load() {
 					return
 				}
 				offset, limit := req.Plan.Offset(idx)
 				if limit <= 0 {
-					abort.Store(true)
 					setErr(idx, offset, fmt.Errorf("tg: illegal limit %d for chunk %d", limit, idx))
 					return
 				}
-				if err := d.downloadChunk(ctx, req, ref, &doneBytes, total, idx, offset, limit, &abort, setErr); err != nil {
+				if err := d.downloadChunk(dlCtx, req, ref, &doneBytes, total, idx, offset, limit, &abort, setErr); err != nil {
 					return
 				}
 			}
