@@ -64,7 +64,7 @@ func adminDispatch(ctx context.Context, b *Bot, msg *models.Message, cmd string)
 	case "status":
 		return true, b.cmdStatus(ctx, msg)
 	case "cancel", "cancel_all":
-		return true, b.cmdCancel(ctx, msg)
+		return true, b.cmdCancel(ctx, msg, cmd)
 	case "show_config", "config":
 		return true, b.cmdShowConfig(ctx, msg)
 	case "sync":
@@ -168,15 +168,20 @@ func formatElapsed(d time.Duration) string {
 // Cancelling a queued task really works: Manager.Cancel sets CANCELLED first, then the worker
 // re-reads the state after taking the semaphore and gives up when it is no longer PENDING (see the
 // gate in manager.go).
-func (b *Bot) cmdCancel(ctx context.Context, msg *models.Message) error {
-	args := commandArgs(msg.Text) // the arguments after stripping /cancel and @botname
-	if len(args) == 0 {
-		_, err := b.sendText(ctx, msg.Chat.ID, "Usage: /cancel <task ID> or /cancel all")
-		return err
+func (b *Bot) cmdCancel(ctx context.Context, msg *models.Message, cmd string) error {
+	var target string
+	if cmd == "cancel_all" {
+		target = "all"
+	} else {
+		args := commandArgs(msg.Text) // the arguments after stripping /cancel and @botname
+		if len(args) == 0 {
+			_, err := b.sendText(ctx, msg.Chat.ID, "Usage: /cancel <task ID> or /cancel all")
+			return err
+		}
+		target = args[0]
 	}
 
 	admin := isAdmin(b.cfg, senderID(msg))
-	target := args[0]
 
 	if strings.EqualFold(target, "all") {
 		var cancelled, skipped int
