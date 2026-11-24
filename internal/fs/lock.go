@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -57,6 +59,7 @@ const (
 //     recreating the file every time.
 type Lock struct {
 	path     string
+	mu       sync.Mutex
 	file     *os.File
 	released bool
 }
@@ -75,6 +78,10 @@ type Lock struct {
 // The returned *Lock must be released with Release() on exit, or released
 // automatically by binding it to a context with HoldUntil(ctx).
 func AcquireLock(path string, opts LockOptions) (*Lock, error) {
+	return acquireLock(context.Background(), path, opts)
+}
+
+func acquireLock(ctx context.Context, path string, opts LockOptions) (*Lock, error) {
 	if opts.WaitTimeout <= 0 {
 		opts.WaitTimeout = defaultWaitTimeout
 	}
@@ -83,7 +90,7 @@ func AcquireLock(path string, opts LockOptions) (*Lock, error) {
 	}
 
 	// Make sure the parent directory exists
-	dir := dirOf(path)
+	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
 		if err := EnsureDir(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("fs.AcquireLock: create lock dir: %w", err)
@@ -92,13 +99,17 @@ func AcquireLock(path string, opts LockOptions) (*Lock, error) {
 
 	// Open or create the lock file; keep the file to preserve flock semantics (inode
 	// stability).
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- lock path comes from local configuration
 	if err != nil {
 		return nil, fmt.Errorf("fs.AcquireLock: open lock file %q: %w", path, err)
 	}
 
 	deadline := time.Now().Add(opts.WaitTimeout)
 	for {
+		if err := ctx.Err(); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("fs.AcquireLock: %w", err)
+		}
 		flockErr := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if flockErr == nil {
 			// Lock acquired: write the PID and start time (truncate, then rewrite)
@@ -108,6 +119,10 @@ func AcquireLock(path string, opts LockOptions) (*Lock, error) {
 			_ = f.Truncate(0)
 			_, _ = f.WriteAt([]byte(info), 0)
 			return &Lock{path: path, file: f}, nil
+		}
+
+		if errors.Is(flockErr, unix.EINTR) {
+			continue
 		}
 
 		// Check whether this is a transient lock conflict
@@ -126,18 +141,30 @@ func AcquireLock(path string, opts LockOptions) (*Lock, error) {
 			)
 		}
 
-		time.Sleep(opts.RetryInterval)
+		timer := time.NewTimer(opts.RetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			_ = f.Close()
+			return nil, fmt.Errorf("fs.AcquireLock: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 }
 
-// Release releases the lock (Flock LOCK_UN + closing the file). It is idempotent:
-// repeated calls do not return an error.
+// Release releases the lock (Flock LOCK_UN + closing the file). It is idempotent and
+// safe for concurrent calls (e.g. defer lock.Release() racing with HoldUntil).
 //
 // Note: Release does not delete the lock file, because flock semantics are based on
 // the fd lifetime rather than the file's existence; other waiting processes retry
 // after they observe the release.
 func (l *Lock) Release() error {
-	if l == nil || l.released {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
 		return nil
 	}
 	l.released = true
@@ -148,7 +175,7 @@ func (l *Lock) Release() error {
 	return l.file.Close()
 }
 
-// HoldUntil waits in a goroutine for ctx to finish, then calls Release automatically.
+// HoldUntil registers a callback on ctx so that Release is called automatically when ctx ends.
 //
 // Design note: this method does not use os/signal (it does not listen to
 // SIGTERM/SIGINT directly); the reasons are:
@@ -170,37 +197,23 @@ func (l *Lock) HoldUntil(ctx context.Context) {
 	if l == nil {
 		return
 	}
-	go func() {
-		<-ctx.Done()
+	context.AfterFunc(ctx, func() {
 		_ = l.Release()
-	}()
+	})
 }
 
 // AcquireLockWithContext is a convenience wrapper around AcquireLock: it acquires the
-// lock and binds it to ctx immediately, releasing the lock when ctx ends.
+// lock (honoring ctx cancellation while waiting) and binds it to ctx immediately,
+// releasing the lock when ctx ends.
 //
 // It suits a single call in main that ties the whole process lifetime to the lock:
 //
 //	lock, err := fs.AcquireLockWithContext(ctx, path, fs.LockOptions{})
 func AcquireLockWithContext(ctx context.Context, path string, opts LockOptions) (*Lock, error) {
-	l, err := AcquireLock(path, opts)
+	l, err := acquireLock(ctx, path, opts)
 	if err != nil {
 		return nil, err
 	}
 	l.HoldUntil(ctx)
 	return l, nil
-}
-
-// dirOf returns the parent directory of path, matching the behavior of filepath.Dir,
-// but returns "." for a path holding only a filename (no directory separator).
-func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' {
-			if i == 0 {
-				return "/"
-			}
-			return path[:i]
-		}
-	}
-	return "."
 }

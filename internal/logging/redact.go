@@ -12,14 +12,19 @@ import (
 )
 
 var (
-	// botTokenRe matches a Telegram bot token (e.g. 123456789:ABCdefGhIjkLmNoPqRsTuVwXyZ123456789)
-	botTokenRe = regexp.MustCompile(`\b\d{8,11}:[A-Za-z0-9_-]{35}\b`)
+	// botTokenRe matches a Telegram bot token, including inside Bot API URLs such as
+	// https://api.telegram.org/bot123456789:ABC.../getMe.
+	botTokenRe = regexp.MustCompile(`(^|[^0-9A-Za-z_]|bot)\d{8,11}:[A-Za-z0-9_-]{35}\b`)
 
 	// proxyAuthRe matches a proxy URL carrying credentials: scheme://user:pass@host
 	proxyAuthRe = regexp.MustCompile(`([a-zA-Z0-9+.-]+://)[^/\s:@]+:[^/\s:@]+@`)
 
-	// phoneRe matches a phone number (e.g. +8613800138000 or 13800138000)
-	phoneRe = regexp.MustCompile(`(\+?\d{1,4})?(\d{3})\d{4}(\d{4})\b`)
+	// phoneIntlRe matches international phone numbers with a leading '+' (e.g. +8613800138000).
+	phoneIntlRe = regexp.MustCompile(`(^|[^\d-])(\+\d{1,4})(\d{3})\d{4}(\d{4})\b`)
+
+	// phoneCNRe matches standalone 11-digit mainland China mobile numbers (e.g. 13912345678)
+	// without matching negative Telegram channel IDs (-100...) or longer numeric IDs.
+	phoneCNRe = regexp.MustCompile(`(^|[^\d-])(1[3-9]\d)\d{4}(\d{4})\b`)
 )
 
 // Redacter redacts strings and fields.
@@ -68,15 +73,16 @@ func (r *Redacter) Redact(text string) string {
 	}
 
 	// 2. match generic credential patterns with regular expressions
-	// 2.1 bot token
-	res = botTokenRe.ReplaceAllString(res, "[REDACTED_BOT_TOKEN]")
+	// 2.1 bot token (preserving any leading delimiter or "bot" URL prefix)
+	res = botTokenRe.ReplaceAllString(res, "${1}[REDACTED_BOT_TOKEN]")
 
-	// 2.2 proxy credentials: replace user:pass@ with ***:***@
-	res = proxyAuthRe.ReplaceAllString(res, "1***:***@")
+	// 2.2 proxy credentials: replace user:pass@ with ***:***@ while preserving scheme://
+	res = proxyAuthRe.ReplaceAllString(res, "${1}***:***@")
 
 	// 2.3 phone number mask: keep the first 3 and last 4 digits and star the middle 4
-	// (e.g. +86138****8000)
-	res = phoneRe.ReplaceAllString(res, "12****3")
+	// (e.g. +86138****8000 or 139****5678)
+	res = phoneIntlRe.ReplaceAllString(res, "${1}${2}${3}****${4}")
+	res = phoneCNRe.ReplaceAllString(res, "${1}${2}****${3}")
 
 	return res
 }
@@ -86,6 +92,10 @@ func (r *Redacter) redactField(f zapcore.Field) zapcore.Field {
 	switch f.Type {
 	case zapcore.StringType:
 		f.String = r.Redact(f.String)
+	case zapcore.ByteStringType:
+		if b, ok := f.Interface.([]byte); ok {
+			f.Interface = []byte(r.Redact(string(b)))
+		}
 	case zapcore.ErrorType:
 		if err, ok := f.Interface.(error); ok && err != nil {
 			f.Interface = &redactedError{msg: r.Redact(err.Error())}
@@ -93,6 +103,14 @@ func (r *Redacter) redactField(f zapcore.Field) zapcore.Field {
 	case zapcore.StringerType:
 		if s, ok := f.Interface.(fmt.Stringer); ok && s != nil {
 			f.Interface = &redactedStringer{text: r.Redact(s.String())}
+		}
+	case zapcore.ArrayMarshalerType:
+		if am, ok := f.Interface.(zapcore.ArrayMarshaler); ok && am != nil {
+			f.Interface = &redactedArrayMarshaler{am: am, r: r}
+		}
+	case zapcore.ObjectMarshalerType:
+		if om, ok := f.Interface.(zapcore.ObjectMarshaler); ok && om != nil {
+			f.Interface = &redactedObjectMarshaler{om: om, r: r}
 		}
 	default:
 		// try to redact common cases for other types carrying a String value or Any
@@ -114,6 +132,66 @@ type redactedStringer struct {
 }
 
 func (s *redactedStringer) String() string { return s.text }
+
+type redactedArrayMarshaler struct {
+	am zapcore.ArrayMarshaler
+	r  *Redacter
+}
+
+func (m *redactedArrayMarshaler) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	return m.am.MarshalLogArray(&redactingArrayEncoder{ArrayEncoder: enc, r: m.r})
+}
+
+type redactingArrayEncoder struct {
+	zapcore.ArrayEncoder
+	r *Redacter
+}
+
+func (e *redactingArrayEncoder) AppendString(v string) {
+	e.ArrayEncoder.AppendString(e.r.Redact(v))
+}
+
+func (e *redactingArrayEncoder) AppendByteString(v []byte) {
+	e.ArrayEncoder.AppendByteString([]byte(e.r.Redact(string(v))))
+}
+
+func (e *redactingArrayEncoder) AppendArray(v zapcore.ArrayMarshaler) error {
+	return e.ArrayEncoder.AppendArray(&redactedArrayMarshaler{am: v, r: e.r})
+}
+
+func (e *redactingArrayEncoder) AppendObject(v zapcore.ObjectMarshaler) error {
+	return e.ArrayEncoder.AppendObject(&redactedObjectMarshaler{om: v, r: e.r})
+}
+
+type redactedObjectMarshaler struct {
+	om zapcore.ObjectMarshaler
+	r  *Redacter
+}
+
+func (m *redactedObjectMarshaler) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	return m.om.MarshalLogObject(&redactingObjectEncoder{ObjectEncoder: enc, r: m.r})
+}
+
+type redactingObjectEncoder struct {
+	zapcore.ObjectEncoder
+	r *Redacter
+}
+
+func (e *redactingObjectEncoder) AddString(key, value string) {
+	e.ObjectEncoder.AddString(key, e.r.Redact(value))
+}
+
+func (e *redactingObjectEncoder) AddByteString(key string, value []byte) {
+	e.ObjectEncoder.AddByteString(key, []byte(e.r.Redact(string(value))))
+}
+
+func (e *redactingObjectEncoder) AddArray(key string, v zapcore.ArrayMarshaler) error {
+	return e.ObjectEncoder.AddArray(key, &redactedArrayMarshaler{am: v, r: e.r})
+}
+
+func (e *redactingObjectEncoder) AddObject(key string, v zapcore.ObjectMarshaler) error {
+	return e.ObjectEncoder.AddObject(key, &redactedObjectMarshaler{om: v, r: e.r})
+}
 
 // RedactingCore is a redacting decorator wrapping zapcore.Core.
 type RedactingCore struct {

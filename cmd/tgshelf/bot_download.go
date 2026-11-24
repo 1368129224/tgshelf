@@ -60,8 +60,9 @@ func (a tgLoginAPI) CheckPassword(ctx context.Context, password string) error {
 //
 // One call does it all: resolve the link -> render a safe relative path -> disk precheck ->
 // chunked download (with progress). The disk precheck must finish before any download artifact
-// exists.
-func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.TaskRunner, logger *zap.Logger) bot.DownloadFunc {
+// exists. A task whose link carries the search: prefix bypasses the resolve step and reads its
+// media items from the search result cache instead.
+func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.TaskRunner, searchStore *bot.SearchStore, logger *zap.Logger) bot.DownloadFunc {
 	root := strings.TrimSpace(cfg.DownloadPath)
 	if logger == nil {
 		logger = zap.NewNop()
@@ -104,26 +105,48 @@ func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.Task
 			zap.String("tag", task.Tag),
 		)
 
-		resolved, err := pipeline.ResolveLink(ctx, task.Link)
-		if err != nil {
-			logger.Warn("resolve download link failed",
+		// Search tasks carry their media items in the in-memory cache; a t.me link goes through
+		// the normal resolve pipeline. Everything below the resolve step is shared.
+		var sourceItems []tg.MediaItem
+		if rest, ok := strings.CutPrefix(task.Link, bot.SearchLinkPrefix); ok {
+			if searchStore == nil {
+				return errors.New("search result store is not wired")
+			}
+			items, ok := searchStore.Get(rest)
+			if !ok || len(items) == 0 {
+				return errors.New("search results expired (they are kept in memory only), search again")
+			}
+			sourceItems = items
+			logger.Info("search task resolved from cache",
 				zap.String("task_id", task.ID),
-				zap.String("link", task.Link),
-				zap.Error(err),
+				zap.String("search_id", rest),
+				zap.Int("items_count", len(items)),
 			)
-			return fmt.Errorf("resolve link: %w", err)
-		}
-		if len(resolved.Items) == 0 {
-			logger.Warn("no usable media in the resolve result",
-				zap.String("task_id", task.ID),
-				zap.String("link", task.Link),
-			)
-			return errors.New("this link has no downloadable media (probably a text or service message)")
+		} else {
+			resolved, err := pipeline.ResolveLink(ctx, task.Link)
+			if err != nil {
+				logger.Warn("resolve download link failed",
+					zap.String("task_id", task.ID),
+					zap.String("link", task.Link),
+					zap.Error(err),
+				)
+				return fmt.Errorf("resolve link: %w", err)
+			}
+			if len(resolved.Items) == 0 {
+				logger.Warn("no usable media in the resolve result",
+					zap.String("task_id", task.ID),
+					zap.String("link", task.Link),
+				)
+				return errors.New("this link has no downloadable media (probably a text or service message)")
+			}
+			sourceItems = resolved.Items
 		}
 
-		items := make([]tg.TaskItem, 0, len(resolved.Items))
+		items := make([]tg.TaskItem, 0, len(sourceItems))
+		seenRel := make(map[string]int, len(sourceItems))
 		var skipped []string // descriptions of the filtered-out items (reported to the user at the end)
-		for _, it := range resolved.Items {
+		isSearchTask := strings.HasPrefix(task.Link, bot.SearchLinkPrefix)
+		for _, it := range sourceItems {
 			rel, rerr := downloadRelPath(cfg.Download.Template, it, task.Tag)
 			if rerr != nil {
 				return rerr
@@ -140,29 +163,40 @@ func newBotDownloader(cfg *config.Config, pipeline *tg.Pipeline, runner *tg.Task
 				skipped = append(skipped, fmt.Sprintf("%s (%s)", it.Name, reason))
 				continue
 			}
+			rel = dedupRelPath(seenRel, rel)
 			// Path traversal protection: reject the whole task when SafeJoin fails, never write to
 			// disk.
 			if _, jerr := naming.SafeJoin(root, rel); jerr != nil {
 				return fmt.Errorf("path validation failed %q: %w", rel, jerr)
 			}
 			itemCopy := it
-			refresh := func(rctx context.Context) (gotdtg.InputFileLocationClass, error) {
-				res, rerr := pipeline.ResolveLink(rctx, task.Link)
-				if rerr != nil {
-					return nil, rerr
+			var refreshFn tg.RefreshFunc
+			if isSearchTask {
+				// A search task has no single link to re-resolve: the item knows its dialog and
+				// message, so the message is fetched again to get a fresh file reference. Large
+				// batches run for hours and every reference in the batch expires meanwhile.
+				refreshFn = func(rctx context.Context) (gotdtg.InputFileLocationClass, error) {
+					return pipeline.RefreshItemLocation(rctx, itemCopy.DialogID, itemCopy.MessageID, mediaDocID(itemCopy))
 				}
-				for _, m := range res.Items {
-					if m.MessageID == itemCopy.MessageID && mediaDocID(m) == mediaDocID(itemCopy) && m.Location != nil {
-						return m.Location, nil
+			} else {
+				refreshFn = func(rctx context.Context) (gotdtg.InputFileLocationClass, error) {
+					res, rerr := pipeline.ResolveLink(rctx, task.Link)
+					if rerr != nil {
+						return nil, rerr
 					}
+					for _, m := range res.Items {
+						if m.MessageID == itemCopy.MessageID && mediaDocID(m) == mediaDocID(itemCopy) && m.Location != nil {
+							return m.Location, nil
+						}
+					}
+					return nil, errors.New("refresh file_reference: original media not found in the re-resolved result")
 				}
-				return nil, errors.New("refresh file_reference: original media not found in the re-resolved result")
 			}
 			items = append(items, tg.TaskItem{
-				Item:    it,
+				Item:    itemCopy,
 				RelPath: rel,
 				Mtime:   time.Unix(it.Date, 0),
-				Refresh: refresh,
+				Refresh: refreshFn,
 			})
 		}
 

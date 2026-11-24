@@ -173,7 +173,7 @@ const sessionLatestVersion = 1
 func validateSessionJSON(data []byte) error {
 	var parsed sessionJSON
 	if err := jsonUnmarshal(data, &parsed); err != nil {
-		return fmt.Errorf("%w: JSON parse failed: %v", ErrSessionCorrupted, err)
+		return fmt.Errorf("%w: JSON parse failed: %w", ErrSessionCorrupted, err)
 	}
 
 	if parsed.Version != sessionLatestVersion {

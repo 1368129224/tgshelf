@@ -270,3 +270,23 @@ func ParseLink(raw string) (MessageRef, error) {
 	}
 	return ref, nil
 }
+
+// MessageLink builds the clickable t.me link of one message: the inverse of ParseLink's channel
+// part. A public username yields https://t.me/<username>/<id>; a private channel yields
+// https://t.me/c/<channelID>/<id> with the raw channel id (no -100 prefix), exactly the shape
+// ParseLink accepts.
+func MessageLink(ref MessageRef, msgID int) (string, error) {
+	if msgID <= 0 {
+		return "", fmt.Errorf("message id %d %w", msgID, ErrBadNumericID)
+	}
+	if ref.Username != "" {
+		if !validUsername(ref.Username) {
+			return "", fmt.Errorf("%w: %q", ErrBadUsername, ref.Username)
+		}
+		return fmt.Sprintf("https://t.me/%s/%d", ref.Username, msgID), nil
+	}
+	if ref.ChannelID > 0 {
+		return fmt.Sprintf("https://t.me/c/%d/%d", ref.ChannelID, msgID), nil
+	}
+	return "", errors.New("tg: message link needs a username or a channel id")
+}

@@ -16,8 +16,10 @@ English | <a href="README_zh.md">简体中文</a>
 - **Fast** — 1 MiB chunks, `threads` in parallel per file, over a multi-DC connection pool.
 - **Resumable** — a chunk bitmap in `downloads/<tag>/.parts/` survives crashes, restarts and `/cancel`.
 - **Albums, private channels, discussion groups** — expanded and resolved transparently.
-- **Readable failures** — `FLOOD_WAIT`, `FILE_REFERENCE_EXPIRED`, `ENOSPC` … become Chinese explanations
-  instead of raw codes.
+- **Keyword search & batch download** — `/search @channel keyword` finds photo/video messages
+  server-side (no full-history scan), previews the hit count and total size, then downloads them all.
+- **Readable failures** — `FLOOD_WAIT`, `FILE_REFERENCE_EXPIRED`, `ENOSPC` … become clear, actionable
+  explanations instead of raw codes.
 - **Live progress** — one edited message per task (bar, percentage, speed, ETA), at most one edit per 3 s.
 - **No babysitting** — tasks survive restarts (`/status`, `/cancel`, retry), single-instance lock,
   path-traversal-proof filenames, secrets redacted from logs.
@@ -66,17 +68,32 @@ English | <a href="README_zh.md">简体中文</a>
 
 ```bash
 docker compose down          # stop
-docker compose up -d --build # update
+docker compose up -d --build # update (when building locally)
 ```
+
+### Docker images (GHCR)
+
+Multi-arch (`linux/amd64`, `linux/arm64`) distroless images are published to GitHub Container Registry at
+[`ghcr.io/1368129224/tgshelf`](https://github.com/1368129224/tgshelf/pkgs/container/tgshelf):
+
+| Image tag | Channel | Description |
+|---|---|---|
+| `ghcr.io/1368129224/tgshelf:latest`<br>`ghcr.io/1368129224/tgshelf:<version>` | **Stable** | Built from formal version tags (e.g. `:2.0.0`, `:v2.0.0`, `:latest`) |
+| `ghcr.io/1368129224/tgshelf:dev`<br>`ghcr.io/1368129224/tgshelf:prerelease`<br>`ghcr.io/1368129224/tgshelf:dev-<sha>` | **Pre-release** | Built automatically on every push to `dev` |
+
+`docker-compose.yml.example` builds from local source by default; to use a prebuilt GHCR image instead,
+comment out `build:` in `docker-compose.yml`, uncomment `image:`, and update with
+`docker compose pull && docker compose up -d`.
 
 ## Commands
 
 | Command | Who | What it does |
 |---|---|---|
 | `/start`, `/help` | allowed users | usage summary |
+| `/search <channel> <keyword>` | allowed users | search a channel's photo/video messages by keyword (server-side `messages.search`), preview the hit count and total size, then batch download via a tag |
 | `/status` | allowed users | queued and running tasks (admins see every task) |
-| `/cancel <id>` / `/cancel all` | allowed users | cancel a task; also exits an in-progress login wizard |
-| `/show_config` (alias `/config`) | allowed users | current configuration with secrets masked |
+| `/cancel <id>` / `/cancel all` (`/cancel_all`) | allowed users | cancel a task; also exits an in-progress login wizard |
+| `/show_config` (alias `/config`) | **admin** | current configuration with secrets masked |
 | `/sync` | **admin** | refresh the dialog/`access_hash` cache (needed for private channels) |
 | `/login` | **admin** | phone → code → 2FA login wizard |
 | `/logout` | **admin** | delete the session file (restart required; revoke the device in Telegram separately) |
@@ -118,6 +135,12 @@ Run `./tgshelf -h` for the full flag list (`-to`, `-tag`, `-threads`, `-file-con
 | `TG_API_ID` / `TG_API_HASH` | `[telegram] api_id` / `api_hash` (must be set together; only with `identity = "custom"`) |
 
 Every key, its default and its constraints: [docs/configuration.md](docs/configuration.md).
+
+**Custom filenames:** by default `[download] template` prefixes `<dialog_id>_<message_id>_` to the
+original filename. To keep the original filename as-is, set `template = '{{ filenamify .FileName }}'`
+(colliding files of different sizes are automatically saved as `name (1).ext`, audio without a
+filename falls back to `Performer - Title.ext`, and compressed Telegram photos use `<photo_id>.jpg`
+because Telegram strips their original filenames).
 
 ## Files on disk
 

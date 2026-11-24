@@ -30,15 +30,24 @@ func CheckSpace(dir string, need int64) error {
 		return fmt.Errorf("fs.CheckSpace: statfs %q: %w", dir, err)
 	}
 
-	// Compute with float64 to avoid int64 overflow in Bavail*Bsize or need*1.2
-	avail := float64(st.Bavail) * float64(st.Bsize)
+	// Prefer Frsize (fundamental filesystem block size) over Bsize (optimal transfer size)
+	// when available; compute with float64 to avoid int64 overflow in Bavail*blockSize or need*1.2.
+	blockSize := st.Bsize
+	if st.Frsize > 0 {
+		blockSize = st.Frsize
+	}
+	avail := float64(st.Bavail) * float64(blockSize)
 	required := float64(need) * 1.2
 
 	if avail < required {
+		availInt := int64(math.MaxInt64)
+		if avail < float64(math.MaxInt64) {
+			availInt = int64(avail)
+		}
 		return fmt.Errorf(
 			"fs.CheckSpace: not enough disk space (need %s / available %s)",
 			HumanBytes(need),
-			HumanBytes(int64(avail)),
+			HumanBytes(availInt),
 		)
 	}
 	return nil
@@ -59,7 +68,7 @@ func HumanBytes(n int64) string {
 		neg = "-"
 		// Handle the math.MinInt64 overflow: convert to float64 first
 		if v == math.MinInt64 {
-			return fmt.Sprintf("-%.2f GiB", float64(math.MaxInt64)/gib+1)
+			return fmt.Sprintf("-%.2f GiB", (float64(math.MaxInt64)+1)/gib)
 		}
 		v = -v
 	}
@@ -77,10 +86,13 @@ func HumanBytes(n int64) string {
 }
 
 // EnsureDir idempotently creates the directory path (including all parent directories)
-// and sets the permission with an explicit Chmod.
+// and sets the permission with an explicit Chmod when needed.
 //
 // If path already exists but is not a directory, it returns a clear error.
 func EnsureDir(path string, perm os.FileMode) error {
+	_, statBeforeErr := os.Stat(path)
+	existed := statBeforeErr == nil
+
 	if err := os.MkdirAll(path, perm); err != nil {
 		return fmt.Errorf("fs.EnsureDir: mkdir %q: %w", path, err)
 	}
@@ -92,9 +104,12 @@ func EnsureDir(path string, perm os.FileMode) error {
 	if !info.IsDir() {
 		return fmt.Errorf("fs.EnsureDir: %q exists but is not a directory", path)
 	}
-	// Explicit Chmod so umask cannot shrink the intended permission
-	if err = os.Chmod(path, perm); err != nil {
-		return fmt.Errorf("fs.EnsureDir: chmod %q: %w", path, err)
+	// Explicit Chmod so umask cannot shrink the intended permission; skip EPERM on
+	// pre-existing directories (e.g. Docker bind mounts owned by another UID).
+	if info.Mode().Perm() != perm {
+		if err = os.Chmod(path, perm); err != nil && (!existed || !errors.Is(err, os.ErrPermission)) {
+			return fmt.Errorf("fs.EnsureDir: chmod %q: %w", path, err)
+		}
 	}
 	return nil
 }

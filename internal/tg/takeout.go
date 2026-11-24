@@ -23,9 +23,13 @@ import (
 )
 
 // InitTakeoutSession starts a takeout session and returns the takeout id.
-// fileMaxSizeMB is the per-file size limit (Telegram caps it at 2000MB; this passes 4000 as a
-// fallback so the server applies its own cap).
+// fileMaxSizeMB is the per-file size limit in MiB (Telegram caps it at 2000 MiB; this passes
+// 4000 as a fallback so the server applies its own cap).
 func InitTakeoutSession(ctx context.Context, api *tg.Client, fileMaxSizeMB int32) (int64, error) {
+	var fileMaxSize int64
+	if fileMaxSizeMB > 0 {
+		fileMaxSize = int64(fileMaxSizeMB) << 20
+	}
 	req := &tg.AccountInitTakeoutSessionRequest{
 		Contacts:          true,
 		MessageUsers:      true,
@@ -33,7 +37,7 @@ func InitTakeoutSession(ctx context.Context, api *tg.Client, fileMaxSizeMB int32
 		MessageMegagroups: true,
 		MessageChannels:   true,
 		Files:             true,
-		FileMaxSize:       int64(fileMaxSizeMB),
+		FileMaxSize:       fileMaxSize,
 	}
 	req.SetFlags()
 
@@ -45,10 +49,16 @@ func InitTakeoutSession(ctx context.Context, api *tg.Client, fileMaxSizeMB int32
 }
 
 // FinishTakeoutSession ends a takeout session (success=true means it completed normally).
+// Per Telegram's MTProto specification, account.finishTakeoutSession must be invoked inside
+// invokeWithTakeout{takeout_id}.
 func FinishTakeoutSession(ctx context.Context, api *tg.Client, takeoutID int64) error {
+	if api == nil {
+		return fmt.Errorf("tg: finish takeout session: api client is nil")
+	}
 	req := &tg.AccountFinishTakeoutSessionRequest{Success: true}
 	req.SetFlags()
-	if _, err := api.AccountFinishTakeoutSession(ctx, req); err != nil {
+	wrapped := tg.NewClient(NewTakeoutInvoker(api.Invoker(), takeoutID))
+	if _, err := wrapped.AccountFinishTakeoutSession(ctx, req); err != nil {
 		// Errors such as SESSION_PASSWORD_NEEDED must not be swallowed, but "takeout is
 		// already gone" style errors can be ignored.
 		if tgerr.Is(err, "TAKEOUT_INVALID", "TAKEOUT_NULL") {

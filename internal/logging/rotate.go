@@ -37,7 +37,7 @@ func NewRotateWriter(filename string, maxBytes int64, maxBackups int) (*RotateWr
 	}
 
 	dir := filepath.Dir(filename)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
 
@@ -54,20 +54,17 @@ func NewRotateWriter(filename string, maxBytes int64, maxBackups int) (*RotateWr
 }
 
 func (w *RotateWriter) openFile() error {
-	info, err := os.Stat(w.filename)
-	if err == nil {
-		w.currSize = info.Size()
-	} else if os.IsNotExist(err) {
-		w.currSize = 0
-	} else {
-		return fmt.Errorf("stat log file: %w", err)
-	}
-
 	f, err := os.OpenFile(w.filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open log file: %w", err)
 	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("stat log file: %w", err)
+	}
 	w.file = f
+	w.currSize = info.Size()
 	return nil
 }
 
@@ -106,10 +103,14 @@ func (w *RotateWriter) rotate() error {
 	for i := w.maxBackups - 1; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", w.filename, i)
 		dst := fmt.Sprintf("%s.%d", w.filename, i+1)
-		_ = os.Rename(src, dst)
+		if err := os.Rename(src, dst); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("rotate log backup %s -> %s: %w", src, dst, err)
+		}
 	}
 
-	_ = os.Rename(w.filename, fmt.Sprintf("%s.1", w.filename))
+	if err := os.Rename(w.filename, fmt.Sprintf("%s.1", w.filename)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("rotate log file %s: %w", w.filename, err)
+	}
 	w.currSize = 0
 	return w.openFile()
 }

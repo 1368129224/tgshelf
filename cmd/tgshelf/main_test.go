@@ -151,3 +151,26 @@ session = %q
 		t.Fatal("health check must fail when the config is missing")
 	}
 }
+
+// TestRunConfigEnvPrecedence verifies -config > TGSHELF_CONFIG > default tgshelf_config.toml.
+func TestRunConfigEnvPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	envCfg := filepath.Join(dir, "from_env.toml")
+	flagCfg := filepath.Join(dir, "from_flag.toml")
+
+	content := fmt.Sprintf("download_path = %q\n", dir)
+	if err := os.WriteFile(envCfg, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TGSHELF_CONFIG", envCfg)
+
+	// Without -config, TGSHELF_CONFIG must be used.
+	if err := run([]string{"-health"}); err != nil {
+		t.Fatalf("health check via TGSHELF_CONFIG failed: %v", err)
+	}
+
+	// With explicit -config pointing to a missing file, the flag must win over TGSHELF_CONFIG.
+	if err := run([]string{"-config", flagCfg, "-health"}); err == nil {
+		t.Fatal("explicit -config must override TGSHELF_CONFIG")
+	}
+}

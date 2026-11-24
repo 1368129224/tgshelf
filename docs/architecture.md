@@ -152,6 +152,22 @@ bot 侧 `progress.Editor` 负责：
 `(peerID → accessHash, title, kind)` 写进 `data/state.json` 的实体缓存，
 TTL 由 `cache_dialogs_hours` 控制（默认 6 小时）。
 
+### 3.4 关键词搜索批量下载（/search）
+
+`/search <channel> <keyword>` 是独立于链接流程的第二入口，两阶段确认：
+
+1. **检索**：`internal/tg/search.go` 把频道参数（`@user` / `t.me/user` / `t.me/c/<id>` / 数字 ID）解析成
+   `MessageRef` 后走共用 PeerResolver；然后 `messages.search` 携带
+   `filter=InputMessagesFilterPhotoVideo` **服务端过滤**（只返回既匹配关键词又含图片/视频的消息，
+   不需要全量拉历史），每页 100 条、`OffsetID=上一页最小 ID` 向前翻页，页间 sleep 500ms 防
+   FLOOD_WAIT，默认 200 条封顶（超出标记 truncated）。命中的相册（`grouped_id ≠ 0`）用 3.3 的
+   ExpandAlbum 补齐同组媒体。
+2. **确认与下载**：`internal/bot/search.go` 异步执行检索（占位消息 → 统计面板：命中消息数、媒体数、
+   总字节），结果存进程内 `SearchStore`（LRU 64 条），`search:<id>` 合成链接走**共用**标签键盘 →
+   `state.Task{Link:"search:<id>"}` → `cmd/tgshelf/bot_download.go` 检测该前缀后跳过
+   ResolveLink，直接从缓存取 `[]MediaItem` 进入既有下载内核（过滤、命名、分片续传全复用）。
+   搜索结果只在内存中，重启后需重新搜索。
+
 ## 4. 存储
 
 | 文件 | 内容 | 保护 |

@@ -90,13 +90,13 @@ func TestBestThreadsTable(t *testing.T) {
 		{5<<20 - 1, 8, 2},
 		{5 << 20, 8, 4}, // ==5MiB -> the <20MiB tier
 		{20<<20 - 1, 8, 4},
-		{20 << 20, 8, 8},   // ==20MiB -> 8
-		{50 << 20, 8, 8},   // >=50MiB -> 8
-		{100 << 20, 4, 4},  // truncated by max=4
-		{100 << 20, 1, 1},  // truncated by max=1
-		{100 << 20, 0, 1},  // max=0 fallback
-		{100 << 20, -3, 1}, // max<0 fallback
-		{0, 0, 1},          // both zero fallback
+		{20 << 20, 8, 8},                        // ==20MiB -> 8
+		{50 << 20, 8, 8},                        // >=50MiB -> 8
+		{100 << 20, 4, 4},                       // truncated by max=4
+		{100 << 20, 1, 1},                       // truncated by max=1
+		{100 << 20, 0, defaultDownloadThreads},  // max=0 fallback
+		{100 << 20, -3, defaultDownloadThreads}, // max<0 fallback
+		{0, 0, 1},                               // both zero fallback
 	}
 	for _, c := range cases {
 		if got := bestThreads(c.size, c.max); got != c.want {
@@ -581,5 +581,56 @@ func TestBestThreadsLargeMax(t *testing.T) {
 		if got := bestThreads(c.size, c.max); got != c.want {
 			t.Errorf("bestThreads(size=%d, max=%d) = %d, want %d", c.size, c.max, got, c.want)
 		}
+	}
+}
+
+// TestTaskCrossTaskCollisionAvoidance verifies that downloading two different-sized files
+// with the same RelPath across separate tasks saves the second as "video (1).mp4" without
+// overwriting "video.mp4", and a third run with SkipSame=true skips "video (1).mp4".
+func TestTaskCrossTaskCollisionAvoidance(t *testing.T) {
+	root := t.TempDir()
+	seed1 := taskSeed(512 << 10)
+	seed2 := taskSeed(768 << 10)
+
+	r1 := newTaskRunner(t, &fakeRPC{seedData: seed1}, RunnerConfig{RootDir: root, SkipSame: true})
+	res1, err := r1.Run(context.Background(), "t-col-1", []TaskItem{taskFakeItem(seed1, "video/clip.mp4", 1)}, nil)
+	if err != nil || res1.State != state.StateDone {
+		t.Fatalf("Run 1: err=%v res=%+v", err, res1)
+	}
+	if res1.Items[0].RelPath != "video/clip.mp4" {
+		t.Fatalf("Run 1 RelPath = %q, want video/clip.mp4", res1.Items[0].RelPath)
+	}
+
+	rpc2 := &fakeRPC{seedData: seed2}
+	r2 := newTaskRunner(t, rpc2, RunnerConfig{RootDir: root, SkipSame: true})
+	res2, err := r2.Run(context.Background(), "t-col-2", []TaskItem{taskFakeItem(seed2, "video/clip.mp4", 2)}, nil)
+	if err != nil || res2.State != state.StateDone {
+		t.Fatalf("Run 2: err=%v res=%+v", err, res2)
+	}
+	if res2.Items[0].RelPath != "video/clip (1).mp4" {
+		t.Fatalf("Run 2 RelPath = %q, want video/clip (1).mp4", res2.Items[0].RelPath)
+	}
+
+	got1, err := os.ReadFile(filepath.Join(root, "video", "clip.mp4"))
+	if err != nil || len(got1) != len(seed1) {
+		t.Fatalf("original clip.mp4 must stay intact: err=%v len=%d", err, len(got1))
+	}
+	got2, err := os.ReadFile(filepath.Join(root, "video", "clip (1).mp4"))
+	if err != nil || len(got2) != len(seed2) {
+		t.Fatalf("colliding clip (1).mp4 must exist with seed2 size: err=%v len=%d", err, len(got2))
+	}
+
+	// Re-running item 2 with SkipSame=true must find "video/clip (1).mp4" and skip without RPCs.
+	rpc3 := &fakeRPC{seedData: seed2}
+	r3 := newTaskRunner(t, rpc3, RunnerConfig{RootDir: root, SkipSame: true})
+	res3, err := r3.Run(context.Background(), "t-col-3", []TaskItem{taskFakeItem(seed2, "video/clip.mp4", 2)}, nil)
+	if err != nil || res3.State != state.StateDone {
+		t.Fatalf("Run 3: err=%v res=%+v", err, res3)
+	}
+	if !res3.Items[0].Skipped || res3.Items[0].RelPath != "video/clip (1).mp4" {
+		t.Fatalf("Run 3 should skip video/clip (1).mp4, got %+v", res3.Items[0])
+	}
+	if rpc3.callCount() != 0 {
+		t.Fatalf("Run 3 getFile calls = %d, want 0", rpc3.callCount())
 	}
 }

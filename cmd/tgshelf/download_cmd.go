@@ -32,7 +32,7 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- non-cryptographic checksum for CLI output
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -145,6 +145,9 @@ type perFileRPC struct {
 
 func (p *perFileRPC) UploadGetFile(ctx context.Context, req *tgpkg.UploadGetFileRequest) (tgpkg.UploadFileClass, error) {
 	p.local.Add(1)
+	if p.shared != nil {
+		p.shared.getFile.Add(1)
+	}
 	return p.inner.UploadGetFile(ctx, req)
 }
 
@@ -212,29 +215,36 @@ func downloadDevice(cfg *config.Config) telegram.DeviceConfig {
 	return tg.DeviceConfigFor(cfg.Telegram)
 }
 
+func downloadMiddlewares(ctx context.Context, stats *rpcStats) []telegram.Middleware {
+	return []telegram.Middleware{
+		recovery.New(ctx, dlReconnectBackoff()),
+		floodWaitCount{ctx: ctx, stats: stats},
+		retry.New(dlMaxRetries),
+	}
+}
+
 // buildDownloadClient builds a counting telegram.Client. The middleware chain matches
 // internal/tg defaultMiddlewares, with only floodWait replaced by the counting version.
-func buildDownloadClient(cfg *config.Config, storage *tg.SessionStorage, stats *rpcStats) (*telegram.Client, error) {
+func buildDownloadClient(ctx context.Context, cfg *config.Config, storage *tg.SessionStorage, stats *rpcStats) (*telegram.Client, error) {
+	creds, err := tg.ResolveCredentials(cfg.Telegram)
+	if err != nil {
+		return nil, err
+	}
 	resolver, err := tg.BuildResolver(cfg.ProxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("build proxy: %w", err)
 	}
-	rootCtx := context.Background()
 	opts := telegram.Options{
 		SessionStorage:      storage,
 		Device:              downloadDevice(cfg),
 		Resolver:            resolver,
 		ReconnectionBackoff: func() backoff.BackOff { return dlReconnectBackoff() },
-		Middlewares: []telegram.Middleware{
-			recovery.New(rootCtx, dlReconnectBackoff()),
-			floodWaitCount{ctx: rootCtx, stats: stats},
-			retry.New(dlMaxRetries),
-		},
-		RetryInterval: dlRetryInterval,
-		MaxRetries:    dlMaxRetries,
-		DialTimeout:   dlDialTimeout,
+		Middlewares:         downloadMiddlewares(ctx, stats),
+		RetryInterval:       dlRetryInterval,
+		MaxRetries:          dlMaxRetries,
+		DialTimeout:         dlDialTimeout,
 	}
-	return telegram.NewClient(cfg.Telegram.APIID, cfg.Telegram.APIHash, opts), nil
+	return telegram.NewClient(creds.AppID, creds.AppHash, opts), nil
 }
 
 // dlItem is one pending download entry: source link, media and the rendered safe relative path.
@@ -269,8 +279,27 @@ type dlEngine struct {
 	keepParts bool
 	stats     *rpcStats
 	out       io.Writer
+	printMu   sync.Mutex
 	started   time.Time
 	pool      dcpool.Pool
+}
+
+// dedupRelPath ensures rel is unique within a batch: 2nd duplicate gets _dup2, 3rd gets _dup3, etc.
+func dedupRelPath(seen map[string]int, rel string) string {
+	if seen[rel] == 0 {
+		seen[rel] = 1
+		return rel
+	}
+	ext := filepath.Ext(rel)
+	base := strings.TrimSuffix(rel, ext)
+	for n := seen[rel] + 1; ; n++ {
+		cand := fmt.Sprintf("%s_dup%d%s", base, n, ext)
+		if seen[cand] == 0 {
+			seen[rel] = n
+			seen[cand] = 1
+			return cand
+		}
+	}
 }
 
 // mediaDocID extracts the document ID of a MediaItem (0 when Location is nil or not a document).
@@ -310,12 +339,12 @@ func downloadRelPath(tpl string, item tg.MediaItem, tag string) (string, error) 
 
 // md5File computes the file MD5 (lowercase hex).
 func md5File(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is the verified output file just downloaded
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
-	h := md5.New()
+	h := md5.New() // #nosec G401 -- non-cryptographic checksum for CLI output
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
 	}
@@ -364,9 +393,15 @@ func runDownload(cfg *config.Config, configPath string, args *downloadArgs) erro
 	if threads <= 0 {
 		threads = cfg.Download.Threads
 	}
+	if threads <= 0 {
+		threads = 1
+	}
 	fileConc := args.fileConcurrency
 	if fileConc <= 0 {
 		fileConc = cfg.Download.FileConcurrency
+	}
+	if fileConc <= 0 {
+		fileConc = 1
 	}
 	chunk := args.chunkBytes
 	if chunk <= 0 {
@@ -386,14 +421,14 @@ func runDownload(cfg *config.Config, configPath string, args *downloadArgs) erro
 	}
 	defer func() { _ = storage.Close() }()
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	stats := &rpcStats{started: time.Now()}
-	client, err := buildDownloadClient(cfg, storage, stats)
+	client, err := buildDownloadClient(ctx, cfg, storage, stats)
 	if err != nil {
 		return fmt.Errorf("build Telegram client: %w", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	dataDir := dataDirOf(configPath)
 	if err := fs.EnsureDir(dataDir, 0o700); err != nil {
@@ -412,7 +447,7 @@ func runDownload(cfg *config.Config, configPath string, args *downloadArgs) erro
 	if poolSize > 32 {
 		poolSize = 32
 	}
-	pool := dcpool.NewPool(client, poolSize)
+	pool := dcpool.NewPool(client, poolSize, downloadMiddlewares(ctx, stats)...)
 	defer func() { _ = pool.Close() }()
 
 	eng := &dlEngine{
@@ -473,11 +508,7 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 				resolveErrs = append(resolveErrs, fmt.Sprintf("[%s] path validation failed %q: %v", raw, rel, jerr))
 				continue
 			}
-			if n := seen[rel]; n > 0 {
-				ext := filepath.Ext(rel)
-				rel = strings.TrimSuffix(rel, ext) + fmt.Sprintf("_dup%d%s", n+1, ext)
-			}
-			seen[rel]++
+			rel = dedupRelPath(seen, rel)
 			items = append(items, dlItem{url: raw, item: item, rel: rel})
 		}
 	}
@@ -524,16 +555,21 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 	}
 
 	// 3) File-level concurrent download: semaphore queueing, the timeline proves the queueing.
+	fileConc := e.fileConc
+	if fileConc <= 0 {
+		fileConc = 1
+	}
 	results := make([]fileStat, len(items))
 	var (
 		wg        sync.WaitGroup
-		sem       = make(chan struct{}, e.fileConc)
+		sem       = make(chan struct{}, fileConc)
 		global    atomic.Int64
 		doneCount atomic.Int64
-		printMu   sync.Mutex
 	)
 	progressStop := make(chan struct{})
+	progressDone := make(chan struct{})
 	go func() {
+		defer close(progressDone)
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 		for {
@@ -541,11 +577,11 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 			case <-progressStop:
 				return
 			case <-t.C:
-				printMu.Lock()
+				e.printMu.Lock()
 				_, _ = fmt.Fprintf(e.out, "[progress] %s / %s (%d/%d files finished) elapsed %s\n",
 					fs.HumanBytes(global.Load()), fs.HumanBytes(total),
 					doneCount.Load(), len(items), time.Since(e.started).Round(time.Millisecond))
-				printMu.Unlock()
+				e.printMu.Unlock()
 			}
 		}
 	}()
@@ -555,7 +591,14 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 		go func(i int) {
 			defer wg.Done()
 			e.timeline(fmt.Sprintf("queued file[%d] %s", i, items[i].rel))
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i] = fileStat{relPath: items[i].rel, err: ctx.Err()}
+				doneCount.Add(1)
+				e.timeline(fmt.Sprintf("end file[%d] %s state=CANCEL", i, items[i].rel))
+				return
+			}
 			defer func() { <-sem }()
 			e.timeline(fmt.Sprintf("start file[%d] %s", i, items[i].rel))
 			results[i] = e.runOneFile(ctx, counting, items[i], refreshFor(items[i]), func(delta int64) { global.Add(delta) })
@@ -572,6 +615,7 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 	}
 	wg.Wait()
 	close(progressStop)
+	<-progressDone
 
 	// 4) Summary.
 	e.printSummary(results, resolveErrs, total, global.Load(), time.Since(e.started))
@@ -589,11 +633,15 @@ func (e *dlEngine) run(ctx context.Context, api *tgpkg.Client, store *state.Stor
 
 // timeline prints an event line with a relative timestamp (concurrency safe).
 func (e *dlEngine) timeline(msg string) {
+	e.printMu.Lock()
 	_, _ = fmt.Fprintf(e.out, "[timeline t+%.3fs] %s\n", time.Since(e.started).Seconds(), msg)
+	e.printMu.Unlock()
 }
 
 // printSummary prints the summary report: per-file results + global statistics.
 func (e *dlEngine) printSummary(results []fileStat, resolveErrs []string, total, done int64, elapsed time.Duration) {
+	e.printMu.Lock()
+	defer e.printMu.Unlock()
 	out := e.out
 	_, _ = fmt.Fprintln(out, "=== download summary ===")
 	var okN, skipN, failN int
@@ -615,7 +663,10 @@ func (e *dlEngine) printSummary(results []fileStat, resolveErrs []string, total,
 		}
 	}
 	floods := e.stats.floodSnapshot()
-	mbps := float64(done) / elapsed.Seconds() / (1 << 20)
+	var mbps float64
+	if secs := elapsed.Seconds(); secs > 0 {
+		mbps = float64(done) / secs / (1 << 20)
+	}
 	_, _ = fmt.Fprintf(out, "succeeded %d/%d (skipped %d, failed %d, resolve failed %d) | downloaded %s / %s | elapsed %s | average %.2f MiB/s | getFile requests %d | FLOOD_WAIT %d times\n",
 		okN, len(results), skipN, failN, len(resolveErrs),
 		fs.HumanBytes(done), fs.HumanBytes(total), elapsed.Round(time.Millisecond), mbps,
@@ -629,28 +680,11 @@ func (e *dlEngine) printSummary(results []fileStat, resolveErrs []string, total,
 // independent copy of the bitmap snapshot -> NewDownloader -> Commit/Abort -> MD5.
 func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, refresh tg.RefreshFunc, onDelta func(int64)) fileStat {
 	res := fileStat{relPath: it.rel}
+	if err := ctx.Err(); err != nil {
+		res.err = err
+		return res
+	}
 	size := it.item.Size
-	final := filepath.Join(e.root, filepath.FromSlash(it.rel))
-	if abs, aerr := filepath.Abs(final); aerr == nil {
-		res.absPath = abs
-	} else {
-		res.absPath = final
-	}
-
-	// skip_same: when a final file with the same name and size already exists, skip it without
-	// a single getFile call.
-	if e.skipSame && size > 0 {
-		if info, err := os.Stat(final); err == nil && info.Size() == size {
-			res.skipped = true
-			res.size = size
-			res.bytes = size
-			if sum, merr := md5File(final); merr == nil {
-				res.md5 = sum
-			}
-			return res
-		}
-	}
-
 	meta := state.ResumeMeta{
 		Size:      size,
 		ChunkSize: e.chunk,
@@ -662,18 +696,28 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 	if e.keepParts {
 		opts = append(opts, state.WithKeepState(true))
 	}
-	sess, err := state.Open(e.root, it.rel, meta, opts...)
+	resolvedRel, skipped, sess, err := state.ResolveTarget(e.root, it.rel, meta, e.skipSame && size > 0, opts...)
 	if err != nil {
 		res.err = fmt.Errorf("open resume session: %w", err)
 		return res
 	}
-	defer func() { _ = sess.Close() }()
-
-	// Write .state early so a resumable state file exists even after a failure or a kill.
-	if err := sess.Flush(); err != nil {
-		res.err = fmt.Errorf("write .state early: %w", err)
+	res.relPath = resolvedRel
+	final := filepath.Join(e.root, filepath.FromSlash(resolvedRel))
+	if abs, aerr := filepath.Abs(final); aerr == nil {
+		res.absPath = abs
+	} else {
+		res.absPath = final
+	}
+	if skipped {
+		res.skipped = true
+		res.size = size
+		res.bytes = size
+		if sum, merr := md5File(final); merr == nil {
+			res.md5 = sum
+		}
 		return res
 	}
+	defer func() { _ = sess.Close() }()
 
 	// Bitmap wiring: Session bitmap snapshot -> independent copy (sess.Done() is never given to ChunkPlan).
 	planBM := state.NewBitmap(int(sess.ChunkCount()))
@@ -705,14 +749,17 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 	refreshStart := e.stats.refreshes.Load()
 
 	var targetRPC = rpc
+	var sharedStats *rpcStats
 	if e.pool != nil {
+		// Pooled connections bypass countingRPC, so perFileRPC updates global getFile stats.
+		sharedStats = e.stats
 		if it.item.DCID > 0 {
 			targetRPC = e.pool.Client(ctx, it.item.DCID)
 		} else {
 			targetRPC = e.pool.Default(ctx)
 		}
 	}
-	dl, err := tg.NewDownloader(&perFileRPC{inner: targetRPC, shared: e.stats, local: &localReqs}, nil)
+	dl, err := tg.NewDownloader(&perFileRPC{inner: targetRPC, shared: sharedStats, local: &localReqs}, nil)
 	if err != nil {
 		res.err = fmt.Errorf("create download core: %w", err)
 		return res
@@ -732,9 +779,15 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 			}
 		},
 		Progress: func(done, tot int64) {
-			prev := prevDone.Swap(done)
-			if delta := done - prev; delta > 0 {
-				onDelta(delta)
+			for {
+				prev := prevDone.Load()
+				if done <= prev {
+					return
+				}
+				if prevDone.CompareAndSwap(prev, done) {
+					onDelta(done - prev)
+					return
+				}
 			}
 		},
 		Refresh: refresh,
@@ -753,7 +806,7 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 		res.err = derr
 		res.bytes = prevDone.Load()
 		if cerr != nil {
-			res.err = fmt.Errorf("%w (closing part file: %v)", res.err, cerr)
+			res.err = fmt.Errorf("%w (closing part file: %w)", res.err, cerr)
 		}
 		return res
 	}
@@ -768,6 +821,8 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 		res.bytes = prevDone.Load()
 		return res
 	}
+	final = sess.FinalPath()
+	res.absPath = final
 	res.size = size
 	res.bytes = size
 	if sum, merr := md5File(final); merr == nil {

@@ -698,3 +698,82 @@ func indexOf(h, n string) int {
 	}
 	return -1
 }
+
+// TestResolveTargetResumeAndConcurrency verifies that ResolveTarget:
+//  1. shifts a second item onto "file (1).bin" when "file.bin" already exists on disk;
+//  2. resumes "file (1).bin" from its existing .state after an interruption;
+//  3. assigns distinct paths to concurrent callers under -race.
+func TestResolveTargetResumeAndConcurrency(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "file.bin"), make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	meta2 := ResumeMeta{Size: 200, ChunkSize: 100, DocID: 222, Peer: 1, MsgID: 2}
+	rel, skipped, sess, err := ResolveTarget(dir, "sub/file.bin", meta2, true)
+	if err != nil || skipped {
+		t.Fatalf("ResolveTarget 1: rel=%q skipped=%v err=%v", rel, skipped, err)
+	}
+	if rel != "sub/file (1).bin" {
+		t.Fatalf("rel = %q, want sub/file (1).bin", rel)
+	}
+	if _, err := sess.WriteAt(make([]byte, 100), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.MarkDone(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retry the interrupted second item: must resume "sub/file (1).bin" with chunk 0 still done.
+	relR, skippedR, sessR, err := ResolveTarget(dir, "sub/file.bin", meta2, true)
+	if err != nil || skippedR {
+		t.Fatalf("ResolveTarget resume: rel=%q skipped=%v err=%v", relR, skippedR, err)
+	}
+	if relR != "sub/file (1).bin" {
+		t.Fatalf("resumed rel = %q, want sub/file (1).bin", relR)
+	}
+	if done, derr := sessR.Done().Get(0); derr != nil || !done {
+		t.Fatalf("expected chunk 0 to remain marked done on resume: done=%v err=%v", done, derr)
+	}
+	_ = sessR.Close()
+
+	// Concurrent callers for the same base name must receive distinct slots.
+	const n = 8
+	var wg sync.WaitGroup
+	gotRels := make([]string, n)
+	sessions := make([]*Session, n)
+	for i := range n {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			m := ResumeMeta{Size: int64(300 + idx*10), ChunkSize: 100, DocID: int64(1000 + idx), Peer: 1, MsgID: 100 + idx}
+			r, sk, s, rerr := ResolveTarget(dir, "sub/conc.bin", m, true)
+			if rerr != nil || sk {
+				t.Errorf("concurrent ResolveTarget[%d]: sk=%v err=%v", idx, sk, rerr)
+				return
+			}
+			gotRels[idx] = r
+			sessions[idx] = s
+		}(i)
+	}
+	wg.Wait()
+	seen := make(map[string]bool, n)
+	for i, r := range gotRels {
+		if r == "" || seen[r] {
+			t.Fatalf("duplicate or empty resolved path at %d: %v", i, gotRels)
+		}
+		seen[r] = true
+		if sessions[i] != nil {
+			_ = sessions[i].Close()
+		}
+	}
+}

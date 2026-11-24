@@ -182,6 +182,9 @@ func (d *Downloader) Download(ctx context.Context, req DownloadRequest) error {
 	doneBytes.Store(req.Plan.CompletedBytes())
 	total := req.Plan.Size
 
+	dlCtx, dlCancel := context.WithCancel(ctx)
+	defer dlCancel()
+
 	var (
 		abort    atomic.Bool // set once any chunk ultimately fails, stops dispatching new chunks
 		errMu    sync.Mutex
@@ -190,10 +193,12 @@ func (d *Downloader) Download(ctx context.Context, req DownloadRequest) error {
 
 	setErr := func(idx, offset int64, err error) {
 		errMu.Lock()
-		defer errMu.Unlock()
 		if firstErr == nil {
 			firstErr = fmt.Errorf("tg: chunk %d at offset %d failed: %w", idx, offset, asFileRefErr(err))
 		}
+		errMu.Unlock()
+		abort.Store(true)
+		dlCancel()
 	}
 
 	// File reference refresher: one per file (counters are isolated per file); when Refresh is nil
@@ -217,16 +222,15 @@ func (d *Downloader) Download(ctx context.Context, req DownloadRequest) error {
 			defer wg.Done()
 			for idx := range tasks {
 				// ctx already canceled or a failure already happened: dispatch no new chunk.
-				if ctx.Err() != nil || abort.Load() {
+				if dlCtx.Err() != nil || abort.Load() {
 					return
 				}
 				offset, limit := req.Plan.Offset(idx)
 				if limit <= 0 {
-					abort.Store(true)
 					setErr(idx, offset, fmt.Errorf("tg: illegal limit %d for chunk %d", limit, idx))
 					return
 				}
-				if err := d.downloadChunk(ctx, req, ref, &doneBytes, total, idx, offset, limit, &abort, setErr); err != nil {
+				if err := d.downloadChunk(dlCtx, req, ref, &doneBytes, total, idx, offset, limit, &abort, setErr); err != nil {
 					return
 				}
 			}
@@ -298,17 +302,19 @@ func (d *Downloader) downloadChunk(
 				if ctx.Err() != nil {
 					return rerr
 				}
-				if errors.Is(rerr, ErrRefreshTooFrequent) {
-					// Rate limit/limit hit: the whole file fails, no more looping.
-					abort.Store(true)
+				if errors.Is(rerr, ErrRefreshTooFrequent) ||
+					errors.Is(rerr, ErrMessageDeleted) ||
+					errors.Is(rerr, ErrNoMedia) ||
+					errors.Is(rerr, ErrChannelInaccessible) {
+					// Permanent or rate-limited refresh failure: abort immediately.
 					setErr(idx, offset, rerr)
 					return rerr
 				}
-				// Non-rate-limited refresh failure: keep the old Location and retry the current
-				// chunk; the refresher's cumulative attempt cap guarantees the loop terminates.
-			} else {
-				cur = newLoc
+				// Transient refresh failure: retry refresh without replaying fetchChunk on the
+				// already-expired Location (Refresher.maxRefreshes bounds total attempts).
+				continue
 			}
+			cur = newLoc
 		}
 		gen0 = ref.Gen()
 		d.logger.Info("tg: file reference updated, retrying current chunk",
@@ -335,8 +341,15 @@ func (d *Downloader) finishChunk(
 	// (only the actual bytes are written); a short response on a middle chunk was already detected
 	// as errShortResponse in getOnce and retried by fetchChunk, so it never reaches here (the
 	// defensive branch stays: excess bytes are never written to disk).
-	if len(buf) > limit {
-		buf = buf[:limit]
+	maxWrite := int64(limit)
+	if rem := total - offset; rem < maxWrite {
+		maxWrite = rem
+	}
+	if maxWrite < 0 {
+		maxWrite = 0
+	}
+	if int64(len(buf)) > maxWrite {
+		buf = buf[:maxWrite]
 	}
 	if _, err := req.Writer.WriteAt(buf, offset); err != nil {
 		// Retrying a disk write is of limited use (a disk-state problem), so abort the whole
@@ -386,7 +399,14 @@ func (d *Downloader) fetchChunk(ctx context.Context, rpc getFileRPC, loc tg.Inpu
 	var lastErr error
 	for attempt := 0; attempt < chunkMaxRetries; attempt++ {
 		if attempt > 0 {
-			delay := d.backoff[attempt-1]
+			var delay time.Duration
+			if len(d.backoff) > 0 {
+				idx := attempt - 1
+				if idx >= len(d.backoff) {
+					idx = len(d.backoff) - 1
+				}
+				delay = d.backoff[idx]
+			}
 			if delay > 0 {
 				select {
 				case <-time.After(delay):

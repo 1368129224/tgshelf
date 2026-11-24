@@ -269,10 +269,10 @@ func TestCancelTerminal(t *testing.T) {
 	}
 }
 
-// Test 8: a non-admin is rejected by /sync /login /logout.
+// Test 8: a non-admin is rejected by /sync /login /logout /show_config.
 func TestAdminCommandsRequireAdmin(t *testing.T) {
 	b, api, _ := newAdminTestBot(t, 2)
-	for _, cmd := range []string{"/sync", "/login", "/logout"} {
+	for _, cmd := range []string{"/sync", "/login", "/logout", "/show_config"} {
 		api.sent = nil
 		msg := textMessage(1, 100, cmd)
 		msg.From = userWithID(1) // not in admin_user_ids
@@ -459,6 +459,43 @@ func TestLoginWizardCancelExit(t *testing.T) {
 	}
 	if out := api.sent[len(api.sent)-1].Text; !strings.Contains(out, "Login wizard closed") {
 		t.Fatalf("/cancel should leave the wizard, got %q", out)
+	}
+}
+
+// Test 12b: a non-admin in the same chat cannot hijack or cancel an admin's login wizard.
+func TestLoginWizardIsolatedToStarterAdmin(t *testing.T) {
+	b, _, _ := newAdminTestBot(t, 2)
+	b.cfg.Bot.AdminUserIDs = []int64{42}
+	fake := &fakeLoginAPI{}
+	b.SetLoginAPI(func(context.Context) (LoginAPI, error) { return fake, nil })
+
+	startMsg := textMessage(1, 100, "/login")
+	startMsg.From = userWithID(42)
+	if err := b.handleText(context.Background(), startMsg); err != nil {
+		t.Fatalf("/login: %v", err)
+	}
+
+	// Non-admin sends a phone number in the same chat: must NOT feed the wizard.
+	intruderMsg := textMessage(2, 100, "+8613800138000")
+	intruderMsg.From = userWithID(99)
+	if err := b.handleText(context.Background(), intruderMsg); err != nil {
+		t.Fatalf("intruder phone: %v", err)
+	}
+	fake.mu.Lock()
+	sent := fake.codeSent
+	fake.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("non-admin must not advance login wizard, SendCode called %d times", sent)
+	}
+
+	// Non-admin sends /cancel in the same chat: must NOT close the admin's wizard.
+	intruderCancel := textMessage(3, 100, "/cancel")
+	intruderCancel.From = userWithID(99)
+	if err := b.handleText(context.Background(), intruderCancel); err != nil {
+		t.Fatalf("intruder cancel: %v", err)
+	}
+	if !b.login.ActiveFor(100, 42) {
+		t.Fatalf("non-admin /cancel must not close admin's login wizard")
 	}
 }
 

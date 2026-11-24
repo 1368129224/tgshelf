@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	tgbot "github.com/go-telegram/bot"
@@ -41,6 +43,12 @@ type callbackHandlerFunc func(ctx context.Context, cbq *models.CallbackQuery) er
 // package does not hard-bind gotd).
 type DownloadFunc func(ctx context.Context, t state.Task, report func(tg.TaskProgress)) error
 
+type inflightKey struct {
+	chatID int64
+	link   string
+	tag    string
+}
+
 // Bot is the assembly and scheduling layer of the Telegram bot.
 type Bot struct {
 	api    BotAPI
@@ -51,9 +59,30 @@ type Bot struct {
 	tasks  *Manager   // manager.go
 	now    func() time.Time
 
+	// depMu protects mutable runtime callbacks swapped on MTProto reconnects.
+	depMu sync.RWMutex
+
+	// inflightMu/inflight reserve (chatID, link, tag) across the SendMessage -> Submit gap
+	// so rapid double-taps cannot bypass duplicate-task checks.
+	inflightMu sync.Mutex
+	inflight   map[inflightKey]struct{}
+
+	// idSeq disambiguates taskID and searchID generated within the same clock tick.
+	idSeq atomic.Uint64
+
 	download DownloadFunc
 	// logout is the /logout implementation; when nil, /logout only reports "not wired".
 	logout LogoutFunc
+	// syncDialogs is the /sync implementation; when nil, /sync reports "not wired".
+	syncDialogs SyncFunc
+	// account is the account lookup implementation; when nil, /show_config shows "not signed in".
+	account AccountFunc
+
+	// searchMedia is the /search implementation (injected via SetSearchMedia); searchStore caches
+	// the media items of one search run behind a "search:<id>" link. When nil, /search reports
+	// "not wired".
+	searchMedia SearchMediaFunc
+	searchStore *SearchStore
 
 	// textHandlers / callbackHandlers are the dispatch entry points registered on the real poller
 	// in Run, or driven directly by a test fake.
@@ -66,21 +95,40 @@ type Bot struct {
 // SetDownload injects the download executor (called by the assembly layer; without it download
 // tasks end with an explicit error).
 func (b *Bot) SetDownload(fn DownloadFunc) {
+	b.depMu.Lock()
 	b.download = fn
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getDownload() DownloadFunc {
+	b.depMu.RLock()
+	fn := b.download
+	b.depMu.RUnlock()
+	return fn
 }
 
 // LogoutFunc is the /logout implementation (the assembly layer deletes the session file).
 type LogoutFunc func(ctx context.Context) error
 
 // SetLoginAPI injects the login RPC getter (logging in is itself how authorization is obtained,
-// so a getter is injected instead of an instance).
+// so a getter is injected instead of an instance). Updates the existing wizard in place so an
+// in-progress /login session survives MTProto reconnects.
 func (b *Bot) SetLoginAPI(getAPI LoginAPIGetter) {
-	b.login = newLoginWizard(getAPI, b.logger)
+	b.login.setGetAPI(getAPI)
 }
 
 // SetLogout injects the /logout implementation.
 func (b *Bot) SetLogout(fn LogoutFunc) {
+	b.depMu.Lock()
 	b.logout = fn
+	b.depMu.Unlock()
+}
+
+func (b *Bot) getLogout() LogoutFunc {
+	b.depMu.RLock()
+	fn := b.logout
+	b.depMu.RUnlock()
+	return fn
 }
 
 // New builds a Bot from an injected BotAPI (unit test setup: api is a fake, zero network).
@@ -184,7 +232,7 @@ func (b *Bot) notifyStartup(ctx context.Context) {
 		b.logger.Warn("no allowed_user_ids / admin_user_ids configured, cannot send the startup notification")
 		return
 	}
-	text := b.startupText()
+	text := b.startupText(ctx)
 	for _, id := range targets {
 		if _, err := b.sendText(ctx, id, text); err != nil {
 			b.logger.Warn("failed to send the startup notification (the user may never have chatted with the bot)",
@@ -194,13 +242,15 @@ func (b *Bot) notifyStartup(ctx context.Context) {
 }
 
 // startupText builds the startup notification body (it contains no secret).
-func (b *Bot) startupText() string {
+func (b *Bot) startupText(ctx context.Context) string {
+	acctCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	var sb strings.Builder
 	sb.WriteString("✅ tgshelf is up and running.\n\n")
 	fmt.Fprintf(&sb, "Download folder: %s\n", b.cfg.DownloadPath)
 	fmt.Fprintf(&sb, "Tags: %s\n", strings.Join(b.cfg.Tags, ", "))
 	fmt.Fprintf(&sb, "Concurrent tasks: %d\n", b.cfg.Bot.MaxConcurrency)
-	sb.WriteString("Account: " + b.accountStatus(context.Background()) + "\n\n")
+	sb.WriteString("Account: " + b.accountStatus(acctCtx) + "\n\n")
 	sb.WriteString("Send a t.me link to download; /help for commands.")
 	return sb.String()
 }

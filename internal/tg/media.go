@@ -261,12 +261,15 @@ func mediaFromDocument(d *tg.Document) (MediaItem, bool) {
 // the Video attribute (rare) is treated as video.
 func mediaDocumentKindAndName(d *tg.Document) (MediaKind, string) {
 	var (
-		hasVideo    bool
-		hasAudio    bool
-		voice       bool
-		hasAnimated bool
-		hasSticker  bool
-		filename    string
+		hasVideo       bool
+		hasAudio       bool
+		voice          bool
+		hasAnimated    bool
+		hasSticker     bool
+		filename       string
+		audioMetaSet   bool
+		audioPerformer string
+		audioTitle     string
 	)
 
 	for _, attr := range d.Attributes {
@@ -277,6 +280,14 @@ func mediaDocumentKindAndName(d *tg.Document) (MediaKind, string) {
 			hasAudio = true
 			if a.Voice {
 				voice = true
+			} else if !audioMetaSet {
+				p := strings.TrimSpace(a.Performer)
+				t := strings.TrimSpace(a.Title)
+				if p != "" || t != "" {
+					audioPerformer = p
+					audioTitle = t
+					audioMetaSet = true
+				}
 			}
 		case *tg.DocumentAttributeAnimated:
 			hasAnimated = true
@@ -305,6 +316,17 @@ func mediaDocumentKindAndName(d *tg.Document) (MediaKind, string) {
 		kind = MediaAudio
 	}
 
+	if filename == "" && !voice && audioMetaSet {
+		ext := mediaExtOf(d.MimeType)
+		switch {
+		case audioPerformer != "" && audioTitle != "":
+			filename = audioPerformer + " - " + audioTitle + ext
+		case audioTitle != "":
+			filename = audioTitle + ext
+		case audioPerformer != "":
+			filename = audioPerformer + ext
+		}
+	}
 	if filename == "" {
 		// No filename: use the stable id plus an extension inferred from the mime type, which makes
 		// deduplication such as --skip-same possible.

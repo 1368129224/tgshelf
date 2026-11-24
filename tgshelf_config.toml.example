@@ -51,7 +51,7 @@ lang_pack = ""
 max_concurrency = 3
 # User IDs allowed to use the bot; empty = no restriction (public deployment is not recommended)
 allowed_user_ids = []
-# Admin user IDs (may run /login /logout /sync)
+# Admin user IDs (may run /login /logout /sync /show_config)
 admin_user_ids = []
 
 [download]
@@ -71,7 +71,7 @@ takeout = false
 include = []
 # Extension blocklist
 exclude = []
-# Filename template
+# Filename template (set '{{ filenamify .FileName }}' to keep original filenames; see docs/configuration.md)
 template = '{{ .DialogID }}_{{ .MessageID }}_{{ filenamify .FileName }}'
 # Keep the .parts state file after success (failures always keep it)
 keep_parts = false

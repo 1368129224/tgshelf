@@ -132,6 +132,14 @@ func runLogin(cfg *config.Config, configPath string, keepSession bool) error {
 	//   that is known to be possibly invalid.
 	//   The user can keep the old file with -keep-session (for debugging or to keep an account
 	//   switch).
+	// Acquire the session lock BEFORE touching sessionPath so running -login while the bot
+	// daemon is active cannot move the live session file out from under the running process.
+	storage, err := tg.OpenSession(sessionPath)
+	if err != nil {
+		return fmt.Errorf("open session: %w", err)
+	}
+	defer func() { _ = storage.Close() }()
+
 	if _, statErr := os.Stat(sessionPath); statErr == nil {
 		if keepSession {
 			fmt.Println("A session already exists; keeping it because of -keep-session and logging in on top of it")
@@ -144,12 +152,6 @@ func runLogin(cfg *config.Config, configPath string, keepSession bool) error {
 			fmt.Printf("A session already exists and was backed up to %s (pass -keep-session to keep the old session)\n", backupPath)
 		}
 	}
-
-	storage, err := tg.OpenSession(sessionPath)
-	if err != nil {
-		return fmt.Errorf("open session: %w", err)
-	}
-	defer func() { _ = storage.Close() }()
 
 	client, err := tg.New(cfg, storage)
 	if err != nil {
@@ -211,7 +213,7 @@ func doLogin(ctx context.Context, client *tg.Client) error {
 		if perr != nil {
 			return fmt.Errorf("read 2FA password: %w", perr)
 		}
-		if perr := client.CheckPassword(ctx, strings.TrimSpace(password)); perr != nil {
+		if perr := client.CheckPassword(ctx, password); perr != nil {
 			return fmt.Errorf("2FA verification: %w", perr)
 		}
 	}

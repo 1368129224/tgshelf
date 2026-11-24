@@ -69,7 +69,7 @@ func SafeJoin(root, rel string) (string, error) {
 	final = filepath.Clean(final)
 
 	// 6. Prefix assertion
-	if final != rootReal && !strings.HasPrefix(final, rootReal+string(filepath.Separator)) {
+	if !isWithinRoot(rootReal, final) {
 		return "", fmt.Errorf("%w: %q is not inside root %q", ErrOutsideRoot, final, rootReal)
 	}
 
@@ -134,19 +134,35 @@ func checkAncestorSymlinks(rootReal, final string) error {
 	resolved, err := filepath.EvalSymlinks(existing)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Distinguish a vanished path from a dangling symlink: a dangling symlink
+			// still exists according to Lstat, and creating a file through it would
+			// follow the link target outside rootReal.
+			if info, lerr := os.Lstat(existing); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("%w: %q is a dangling symlink", ErrOutsideRoot, existing)
+			}
 			return nil // vanished in a race with lstat: no link to escape through
 		}
 		return fmt.Errorf("naming.SafeJoin: resolve %q: %w", existing, err)
 	}
-	if err != nil {
-		return fmt.Errorf("naming.SafeJoin: resolve %q: %w", existing, err)
-	}
 	resolved = filepath.Clean(resolved)
-	if resolved != rootReal && !strings.HasPrefix(resolved, rootReal+string(filepath.Separator)) {
+	if !isWithinRoot(rootReal, resolved) {
 		return fmt.Errorf("%w: %q resolves through a symlink to %q, outside root %q",
 			ErrOutsideRoot, existing, resolved, rootReal)
 	}
 	return nil
+}
+
+// isWithinRoot reports whether candidate is equal to rootReal or strictly inside it.
+// It handles filesystem roots ("/" or "C:\") that already end with a path separator.
+func isWithinRoot(rootReal, candidate string) bool {
+	if candidate == rootReal {
+		return true
+	}
+	sep := string(filepath.Separator)
+	if strings.HasSuffix(rootReal, sep) {
+		return strings.HasPrefix(candidate, rootReal)
+	}
+	return strings.HasPrefix(candidate, rootReal+sep)
 }
 
 // hasWindowsDrivePrefix reports whether the path starts with a Windows volume name

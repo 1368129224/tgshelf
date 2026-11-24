@@ -22,18 +22,12 @@ import (
 	"github.com/1368129224/tgshelf/internal/tg"
 )
 
-// adminCommandHook is the injection point for admin commands.
-//
-// The command dispatcher knows nothing about /status /cancel /show_config /sync and so on;
-// admin.go implements those and injects them through this variable, so the two places never
-// fight over one method name. handled=true means the command was processed and err is its result.
-var adminCommandHook func(ctx context.Context, b *Bot, msg *models.Message, cmd string) (bool, error)
-
 const (
 	// helpText is the reply to /help and /start.
 	helpText = "Usage: send one or more t.me message links to the bot, pick a tag and it downloads them.\n\n" +
 		"Commands:\n" +
 		"/help — show this help\n" +
+		"/search <channel> <keyword> — search a channel's photo/video messages and batch download them\n" +
 		"/status — show queued and running tasks\n" +
 		"/cancel [ID|all] — cancel tasks\n" +
 		"/show_config — show the current config (secrets masked)"
@@ -70,10 +64,13 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 		case "start", "help":
 			_, err := b.sendText(ctx, msg.Chat.ID, helpText)
 			return err
+		case "search":
+			return b.onSearchCommand(ctx, msg)
 		case "cancel":
-			// /cancel doubles as "leave the login wizard": while a wizard is running that wins,
-			// otherwise it falls through to task cancellation (admin.go's cmdCancel).
-			if b.login.Active(msg.Chat.ID) {
+			// /cancel doubles as "leave the login wizard": while a wizard is running for this
+			// admin user that wins, otherwise it falls through to task cancellation (cmdCancel).
+			uid := senderID(msg)
+			if isAdmin(b.cfg, uid) && b.login.ActiveFor(msg.Chat.ID, uid) {
 				b.login.clear(msg.Chat.ID)
 				_, err := b.sendText(ctx, msg.Chat.ID, "Login wizard closed (the existing session was not deleted).")
 				return err
@@ -84,10 +81,9 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 		}
 	}
 
-	// The login wizard comes first: while it runs, ordinary text is a phone number / login code /
-	// 2FA password and must not be treated as a link (in real acceptance testing a phone number
-	// ended up in handleLinks exactly this way).
-	if b.login.Active(msg.Chat.ID) {
+	// The login wizard comes first: while it runs for this admin user, ordinary text is a phone
+	// number / login code / 2FA password and must not be treated as a link.
+	if uid := senderID(msg); isAdmin(b.cfg, uid) && b.login.ActiveFor(msg.Chat.ID, uid) {
 		return b.handleLoginInput(ctx, msg)
 	}
 
@@ -101,7 +97,9 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 // group). A failed delete does not block the login flow.
 func (b *Bot) handleLoginInput(ctx context.Context, msg *models.Message) error {
 	chatID := msg.Chat.ID
-	text := strings.TrimSpace(msg.Text)
+	// Pass raw msg.Text: wizard.go trims phone/code where appropriate, while preserving
+	// leading/trailing spaces in 2FA passwords.
+	text := msg.Text
 
 	// Delete first, then reply: even if a later RPC fails, the sensitive content is already gone
 	// from the chat.
@@ -146,26 +144,53 @@ func (b *Bot) handleLinks(ctx context.Context, msg *models.Message) error {
 	return nil
 }
 
-// dispatchCommand dispatches non-builtin commands; admin commands are injected through
-// adminCommandHook.
+// dispatchCommand dispatches non-builtin commands to adminDispatch.
 func (b *Bot) dispatchCommand(ctx context.Context, msg *models.Message, cmd string) error {
-	if adminCommandHook != nil {
-		if handled, err := adminCommandHook(ctx, b, msg, cmd); handled {
-			return err
-		}
+	if handled, err := adminDispatch(ctx, b, msg, cmd); handled {
+		return err
 	}
 	_, err := b.sendText(ctx, msg.Chat.ID, fmt.Sprintf("Unknown command: %s\nSend /help for usage", cmd))
 	return err
 }
 
+var errDuplicateTask = errors.New("bot: task already downloading")
+
+// tryReserveDownload atomically checks both in-flight reservations and active store tasks so
+// rapid double-taps cannot start two concurrent downloads for the same (chatID, link, tag).
+func (b *Bot) tryReserveDownload(chatID int64, link, tag string) (func(), bool) {
+	key := inflightKey{chatID: chatID, link: link, tag: tag}
+	b.inflightMu.Lock()
+	if b.inflight == nil {
+		b.inflight = make(map[inflightKey]struct{})
+	}
+	if _, busy := b.inflight[key]; busy || b.hasActiveTask(chatID, link, tag) {
+		b.inflightMu.Unlock()
+		return nil, false
+	}
+	b.inflight[key] = struct{}{}
+	b.inflightMu.Unlock()
+	return func() {
+		b.inflightMu.Lock()
+		delete(b.inflight, key)
+		b.inflightMu.Unlock()
+	}, true
+}
+
 // startDownload is the single entry point for starting a download task (shared by onSelectTag and
 // onRetry).
 //
-// It returns the new task's ID. Deduplication is the caller's job (see hasActiveTask).
+// It returns the new task's ID, or errDuplicateTask if the same (chatID, link, tag) is already
+// active or being started.
 func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string) (string, error) {
+	release, ok := b.tryReserveDownload(chatID, link, tag)
+	if !ok {
+		return "", errDuplicateTask
+	}
+	defer release()
+
 	// The task ID is created before the placeholder message: the placeholder needs a "Cancel"
 	// button, and the button carries the taskID.
-	taskID := fmt.Sprintf("%d-%d", chatID, b.now().UnixNano())
+	taskID := fmt.Sprintf("%d-%d-%d", chatID, b.now().UnixNano(), b.idSeq.Add(1))
 
 	placeholder, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID: chatID,
@@ -211,7 +236,7 @@ func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string)
 
 	work := func(wctx context.Context, t state.Task) error {
 		started := b.now()
-		fn := b.download
+		fn := b.getDownload()
 		b.logger.Info("download task started",
 			zap.String("task_id", taskID),
 			zap.String("link", link),
@@ -231,10 +256,19 @@ func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string)
 			})
 		}
 
+		// Commit the terminal state atomically before editing the final message so a concurrent
+		// Cancel cannot transition a finished task to CANCELLED and overwrite "✅ Download complete"
+		// with "⛔ Cancelling…".
+		targetState := state.StateDone
+		if runErr != nil {
+			targetState = state.StateFailed
+		}
+		finalState := b.tasks.Finish(taskID, targetState)
+
 		// Cancel path: /cancel or the "Cancel" button may have written only "Cancelling…", so
 		// finish the cancellation text here and drop the buttons. Never write "❌ Download failed"
 		// over a cancellation - that is exactly what made real acceptance item 4 fail.
-		if cur, ok := b.tasks.Get(taskID); ok && cur.State == state.StateCancelled {
+		if finalState == state.StateCancelled {
 			b.logger.Info("download task cancelled",
 				zap.String("task_id", taskID),
 				zap.String("link", link),
@@ -290,7 +324,7 @@ func (b *Bot) startDownload(ctx context.Context, chatID int64, link, tag string)
 			zap.String("tag", tag),
 			zap.Error(err),
 		)
-		_ = b.editTerminalSync(ctx, chatID, msgID, "❌ Could not create the task: "+b.translate(err), nil)
+		_ = b.editTerminalSync(ctx, chatID, msgID, "❌ Could not create the task: "+b.translate(err), emptyMarkup())
 		return "", err
 	}
 	return taskID, nil
@@ -429,12 +463,10 @@ func (b *Bot) onSelectTag(ctx context.Context, cbq *models.CallbackQuery, cb Cal
 	}
 	tag := b.cfg.Tags[cb.TagIdx]
 
-	// Deduplication: don't start a second task while the same link + tag is running.
-	if b.hasActiveTask(chatID, link, tag) {
-		return b.answerCallback(ctx, cbq, "This link is already downloading", true)
-	}
-
 	if _, err := b.startDownload(ctx, chatID, link, tag); err != nil {
+		if errors.Is(err, errDuplicateTask) {
+			return b.answerCallback(ctx, cbq, "This link is already downloading", true)
+		}
 		return b.answerCallback(ctx, cbq, "Could not start: "+b.translate(err), true)
 	}
 
@@ -481,12 +513,19 @@ func (b *Bot) onPage(ctx context.Context, cbq *models.CallbackQuery, cb Callback
 		return b.answerCallback(ctx, cbq, "Cannot identify this chat", true)
 	}
 	kb, _ := buildTagKeyboard(b.cfg.Tags, cb.ShortID, cb.Page)
-	// The text is rebuilt from the link looked up by short ID, so resend the whole message
-	// instead of only swapping the keyboard.
+	// Preserve the original message text (e.g. /search confirmation panels) so paging the tag
+	// keyboard does not overwrite search results with an internal "search:<id>" link.
+	text := ""
+	if cbq != nil && cbq.Message.Message != nil {
+		text = cbq.Message.Message.Text
+	}
+	if text == "" {
+		text = tagPromptText + link
+	}
 	if _, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{
 		ChatID:      chatID,
 		MessageID:   messageID,
-		Text:        tagPromptText + link,
+		Text:        text,
 		ReplyMarkup: kb,
 	}); err != nil {
 		b.logger.Debug("failed to rebuild the keyboard on page change", zap.Error(err))
@@ -506,10 +545,9 @@ func (b *Bot) onCancelTask(ctx context.Context, cbq *models.CallbackQuery, cb Ca
 	}
 
 	// Permissions: you can only cancel tasks in your own chat; admins can cancel anyone's.
-	if chatID, _, hasChat := callbackChat(cbq); hasChat {
-		if task.ChatID != chatID && !isAdmin(b.cfg, cbq.From.ID) {
-			return b.answerCallback(ctx, cbq, "You can only cancel your own tasks", true)
-		}
+	chatID, _, hasChat := callbackChat(cbq)
+	if !isAdmin(b.cfg, cbq.From.ID) && (!hasChat || task.ChatID != chatID) {
+		return b.answerCallback(ctx, cbq, "You can only cancel your own tasks", true)
 	}
 
 	b.logger.Info("user requested to cancel a download task",
@@ -529,11 +567,13 @@ func (b *Bot) onCancelTask(ctx context.Context, cbq *models.CallbackQuery, cb Ca
 	}
 
 	msg := "Cancelling…"
+	var markup models.ReplyMarkup
 	if prev == state.StatePending {
 		msg = "Cancelled (it was still queued and never started)"
+		markup = emptyMarkup()
 	}
 	if updated.MessageID > 0 {
-		b.editTerminal(task.ChatID, int(updated.MessageID), "⛔ "+msg, nil)
+		b.editTerminal(task.ChatID, int(updated.MessageID), "⛔ "+msg, markup)
 	}
 	return b.answerCallback(ctx, cbq, msg, false)
 }
@@ -545,15 +585,15 @@ func (b *Bot) onRetry(ctx context.Context, cbq *models.CallbackQuery, cb Callbac
 	if !ok {
 		return b.answerCallback(ctx, cbq, "The original task has expired, send the link again", true)
 	}
-	if b.hasActiveTask(old.ChatID, old.Link, old.Tag) {
-		return b.answerCallback(ctx, cbq, "This link is already downloading", true)
+	// Permissions: you can only retry tasks in your own chat; admins can retry anyone's.
+	chatID, _, hasChat := callbackChat(cbq)
+	if !isAdmin(b.cfg, cbq.From.ID) && (!hasChat || old.ChatID != chatID) {
+		return b.answerCallback(ctx, cbq, "You can only retry your own tasks", true)
 	}
-	b.logger.Info("user triggered a retry of the download task",
-		zap.String("old_task_id", cb.TaskID),
-		zap.String("link", old.Link),
-		zap.String("tag", old.Tag),
-	)
 	if _, err := b.startDownload(ctx, old.ChatID, old.Link, old.Tag); err != nil {
+		if errors.Is(err, errDuplicateTask) {
+			return b.answerCallback(ctx, cbq, "This link is already downloading", true)
+		}
 		return b.answerCallback(ctx, cbq, "Retry failed: "+b.translate(err), true)
 	}
 	return b.answerCallback(ctx, cbq, "Download restarted", false)

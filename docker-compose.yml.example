@@ -1,9 +1,9 @@
 services:
   tgshelf:
     # Build locally by default (recommended: no dependency on a published image).
-    # Alternatively comment out build and enable the line below to use the image
-    # built by GitHub Actions:
-    # image: ghcr.io/1368129224/tgshelf:latest
+    # Alternatively comment out build and enable one of the prebuilt GHCR images:
+    # image: ghcr.io/1368129224/tgshelf:latest   # stable release
+    # image: ghcr.io/1368129224/tgshelf:dev      # pre-release (dev branch)
     build:
       context: .
       dockerfile: deploy/Dockerfile

@@ -186,6 +186,7 @@ func (c *Client) SendCode(ctx context.Context, phone string) (string, error) {
 
 // sendCode is the testable implementation of SendCode.
 func (f *loginFlow) sendCode(ctx context.Context, phone string) (string, error) {
+	ctx = withSkipFloodWait(ctx)
 	normalized, err := NormalizePhone(phone)
 	if err != nil {
 		return "", err
@@ -200,7 +201,7 @@ func (f *loginFlow) sendCode(ctx context.Context, phone string) (string, error) 
 		// AUTH_RESTART: the local auth key is dead, retrying is pointless, return
 		// recovery guidance right away.
 		if isAuthRestart(err) {
-			return "", fmt.Errorf("%w (original error: %s)", ErrAuthRestart, err)
+			return "", fmt.Errorf("%w (original error: %w)", ErrAuthRestart, err)
 		}
 
 		targetDC, ok := migrateTarget(err)
@@ -274,6 +275,7 @@ func (c *Client) SignIn(ctx context.Context, phone, hash, code string) (bool, er
 
 // signIn is the testable implementation of SignIn.
 func (f *loginFlow) signIn(ctx context.Context, phone, hash, code string) (bool, error) {
+	ctx = withSkipFloodWait(ctx)
 	normalized, err := NormalizePhone(phone)
 	if err != nil {
 		return false, err
@@ -338,6 +340,7 @@ func (c *Client) CheckPassword(ctx context.Context, password string) error {
 
 // checkPassword is the testable implementation of CheckPassword.
 func (f *loginFlow) checkPassword(ctx context.Context, password string) error {
+	ctx = withSkipFloodWait(ctx)
 	if strings.TrimSpace(password) == "" {
 		return errors.New("tg: 2FA password is empty")
 	}

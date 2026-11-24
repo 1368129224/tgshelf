@@ -93,7 +93,7 @@
 | `{{ .DialogID }}` | 对话 ID（频道是 `-100…` 形式） |
 | `{{ .MessageID }}` | 消息 ID |
 | `{{ .MessageDate }}` | 消息发送时间（`time.Time`） |
-| `{{ .FileName }}` | 原始文件名（**不可信输入**，务必用 `filenamify` 或模板外的自动清洗） |
+| `{{ .FileName }}` | 原始文件名（**不可信输入**，务必用 `filenamify` 或模板外的自动清洗）：文档/视频/原图优先取上传时的 `DocumentAttributeFilename`；无文件名的音频优先回退为 `Performer - Title.<ext>`，再回退为 `<DocumentID>.<ext>`；Telegram 普通压缩图片因服务端不保存原名，固定为 `<PhotoID>.jpg` |
 | `{{ .FileSize }}` | 文件字节数 |
 | `{{ .DownloadDate }}` | 下载发起时间（`time.Time`） |
 | `{{ .FileCaption }}` | 目前恒为空（未填充） |
@@ -104,8 +104,17 @@
 示例：
 
 ```toml
+# 默认值（带对话 ID 与消息 ID 前缀）
+template = '{{ .DialogID }}_{{ .MessageID }}_{{ filenamify .FileName }}'
+
+# 直接使用原始文件名（无前缀）
+template = '{{ filenamify .FileName }}'
+
+# 按消息日期 + 消息 ID + 截断后的原文件名
 template = '{{ .MessageDate | date "20060102" }}_{{ .MessageID }}_{{ truncate (filenamify .FileName) 80 }}'
 ```
+
+**同名文件防覆盖说明**：当磁盘目标路径已存在同名文件时，若开启了 `skip_same = true` 且文件大小完全一致则直接跳过；若大小不一致（或 `skip_same = false`），系统会自动重命名为 `原名 (1).ext`、`原名 (2).ext`……绝不会覆盖已有文件，且中断后重试仍能精准续传对应的 `.parts/` 状态。
 
 > 模板只能决定**文件名**：渲染结果统一过一遍 `Sanitize`，`/ \ : * ? " < > |` 以及控制字符
 > 都会被剔除，所以模板里写不出子目录。要分目录就用标签（`tags`，下载时点选）。

@@ -13,10 +13,13 @@ RUN go mod download
 COPY . .
 ARG TARGETOS TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags='-s -w' -o /out/tgshelf ./cmd/tgshelf
+    go build -trimpath -ldflags='-s -w' -o /out/tgshelf ./cmd/tgshelf && \
+    mkdir -p /out/data /out/downloads
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/tgshelf /tgshelf
+COPY --from=builder --chown=nonroot:nonroot /out/data /data
+COPY --from=builder --chown=nonroot:nonroot /out/downloads /downloads
 WORKDIR /
 ENV TZ=Asia/Shanghai
 USER nonroot:nonroot

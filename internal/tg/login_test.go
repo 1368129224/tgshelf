@@ -343,7 +343,7 @@ func TestSignIn_CodeInvalidVsExpired(t *testing.T) {
 			}
 			// The two must not be equivalent, otherwise the upper layer cannot tell them apart.
 			other := ErrPhoneCodeExpired
-			if tc.want == ErrPhoneCodeExpired {
+			if errors.Is(tc.want, ErrPhoneCodeExpired) {
 				other = ErrPhoneCodeInvalid
 			}
 			if errors.Is(err, other) {

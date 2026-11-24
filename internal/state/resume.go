@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -86,7 +87,8 @@ func WithMtime(t time.Time) Option {
 // Bitmap itself is not concurrency safe, so every access happens under the internal lock
 // of Session.
 type Session struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	flushMu sync.Mutex // serializes disk Flush/Commit/Close without holding mu across I/O
 
 	meta      ResumeMeta
 	numChunks int64
@@ -105,6 +107,105 @@ type Session struct {
 	chunksSince int       // chunks completed since the last Flush
 	lastFlush   time.Time // time of the last Flush (initialized to the Open time)
 	committed   bool
+	activeKey   string // registered in activeStatePaths when opened via ResolveTarget
+}
+
+var (
+	resolveMu        sync.Mutex
+	activeStatePaths = make(map[string]struct{})
+)
+
+// ResolveTarget selects a non-colliding relative path for a download and (unless skipped)
+// opens and pre-flushes its resumable Session atomically.
+//
+// Candidate order: relPath, then "<dir><base> (1)<ext>" .. "<dir><base> (999)<ext>".
+//   - If a candidate's final file already exists on disk:
+//   - when skipSame is true and the regular file size equals meta.Size, it returns
+//     (candRel, true, nil, nil) without opening a session;
+//   - otherwise that candidate is treated as occupied so existing files are never
+//     overwritten, and the search moves to the next candidate.
+//   - If the final file does not exist:
+//   - when another live Session or a valid .state belonging to a different item already
+//     occupies .parts/<cand>.state, the search moves to the next candidate;
+//   - when no .state exists, or the .state matches meta (same interrupted item), Open is
+//     called to start or resume on candRel and .state is flushed immediately.
+func ResolveTarget(root, relPath string, meta ResumeMeta, skipSame bool, opts ...Option) (string, bool, *Session, error) {
+	if relPath == "" {
+		return "", false, nil, fmt.Errorf("resume: relPath must not be empty")
+	}
+
+	resolveMu.Lock()
+	defer resolveMu.Unlock()
+
+	slashRel := filepath.ToSlash(relPath)
+	dir, file := path.Split(slashRel)
+	ext := path.Ext(file)
+	base := strings.TrimSuffix(file, ext)
+
+	for i := range 1000 {
+		candRel := slashRel
+		if i > 0 {
+			candRel = dir + fmt.Sprintf("%s (%d)%s", base, i, ext)
+		}
+		osCandRel := filepath.FromSlash(candRel)
+		finalPath, err := resolveWithin(root, osCandRel)
+		if err != nil {
+			return "", false, nil, err
+		}
+
+		info, statErr := os.Stat(finalPath)
+		if statErr == nil {
+			if skipSame && meta.Size >= 0 && !info.IsDir() && info.Size() == meta.Size {
+				return candRel, true, nil, nil
+			}
+			continue
+		}
+		if !errors.Is(statErr, os.ErrNotExist) {
+			return "", false, nil, fmt.Errorf("resume: stat final %q: %w", finalPath, statErr)
+		}
+
+		statePath := filepath.Join(filepath.Dir(finalPath), partsDirName, filepath.Base(finalPath)+".state")
+		if _, busy := activeStatePaths[statePath]; busy {
+			continue
+		}
+		if otherItemStateExists(statePath, meta) {
+			continue
+		}
+
+		s, err := Open(root, osCandRel, meta, opts...)
+		if err != nil {
+			return "", false, nil, err
+		}
+		if ferr := s.Flush(); ferr != nil {
+			_ = s.Close()
+			return "", false, nil, fmt.Errorf("resume: pre-flush state %q: %w", candRel, ferr)
+		}
+		s.activeKey = statePath
+		activeStatePaths[statePath] = struct{}{}
+		return candRel, false, s, nil
+	}
+
+	return "", false, nil, fmt.Errorf("resume: all 1000 candidate paths exist for %q", relPath)
+}
+
+// otherItemStateExists reports whether statePath holds a valid resumeState belonging to a
+// different media item than meta (so its resumable progress must not be overwritten).
+func otherItemStateExists(statePath string, meta ResumeMeta) bool {
+	b, err := os.ReadFile(statePath) // #nosec G304 -- statePath is confined inside rootDir/.parts
+	if err != nil {
+		return false
+	}
+	var rs resumeState
+	if err := json.Unmarshal(b, &rs); err != nil || rs.V != resumeStateVersion {
+		return false
+	}
+	if rs.Size != meta.Size || rs.Chunk != meta.ChunkSize || rs.DocID != meta.DocID {
+		return true
+	}
+	if rs.DocID == 0 && (rs.Peer != meta.Peer || rs.MsgID != meta.MsgID) {
+		return true
+	}
+	return false
 }
 
 // Open opens (or recreates) the part and state files in the .parts directory of
@@ -156,7 +257,7 @@ func Open(root, relPath string, meta ResumeMeta, opts ...Option) (*Session, erro
 
 	// 1. try to load an existing .state and run the three checks.
 	var loaded *Bitmap
-	b, err := os.ReadFile(statePath)
+	b, err := os.ReadFile(statePath) // #nosec G304 -- statePath is confined inside rootDir/.parts
 	switch {
 	case err == nil:
 		loaded, s.resetReason = loadAndValidate(b, meta, numChunks)
@@ -174,7 +275,7 @@ func Open(root, relPath string, meta ResumeMeta, opts ...Option) (*Session, erro
 	// 3. open the part file: keep existing data if reusable, else truncate and preallocate.
 	var f *os.File
 	if loaded != nil {
-		f, err = os.OpenFile(partPath, os.O_RDWR, resumeFilePerm)
+		f, err = os.OpenFile(partPath, os.O_RDWR, resumeFilePerm) // #nosec G304 -- partPath is confined inside rootDir/.parts
 		if err != nil {
 			return nil, fmt.Errorf("resume: open part %q: %w", partPath, err)
 		}
@@ -182,7 +283,7 @@ func Open(root, relPath string, meta ResumeMeta, opts ...Option) (*Session, erro
 		// reuse failed or first download: delete old files and start over (reason already set).
 		_ = os.Remove(statePath)
 		_ = os.Remove(partPath)
-		f, err = os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, resumeFilePerm)
+		f, err = os.OpenFile(partPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, resumeFilePerm) // #nosec G304 -- partPath is confined inside rootDir/.parts
 		if err != nil {
 			return nil, fmt.Errorf("resume: create part %q: %w", partPath, err)
 		}
@@ -335,6 +436,14 @@ func (s *Session) Done() *Bitmap {
 	return s.bm
 }
 
+// FinalPath returns the destination path of the final file (updated on Commit if a
+// last-moment collision occurred).
+func (s *Session) FinalPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finalPath
+}
+
 // PartPath returns the path of the .part file.
 func (s *Session) PartPath() string { return s.partPath }
 
@@ -390,40 +499,54 @@ func (s *Session) ShouldFlush(completedChunks int) bool {
 	return time.Since(s.lastFlush) >= resumeFlushInterval
 }
 
-// Flush persists .state atomically (temp+rename+fsync) and fsyncs the part file.
-// Safe for concurrent calls: serialization happens under the internal lock; Flush after
-// Commit is a no-op.
+// Flush fsyncs the part file first and then persists .state atomically (temp+rename+fsync).
+// Ordering matters for crash safety: .state must never mark chunks done before their bytes
+// are durable in .part.
+// Safe for concurrent calls: flushMu serializes disk I/O while mu is only held for the
+// in-memory snapshot, so concurrent WriteAt/MarkDone calls are not blocked on fsync.
+// Flush after Commit is a no-op.
 func (s *Session) Flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.committed {
+		s.mu.Unlock()
 		return nil
 	}
 	if s.f == nil {
+		s.mu.Unlock()
 		return fmt.Errorf("resume: session closed")
 	}
+	f := s.f
+	partPath := s.partPath
+	statePath := s.statePath
 	rs := resumeState{
 		V:         resumeStateVersion,
 		Size:      s.meta.Size,
 		Chunk:     s.meta.ChunkSize,
-		Done:      s.bm,
+		Done:      &Bitmap{data: s.bm.Bytes()},
 		DocID:     s.meta.DocID,
 		Peer:      s.meta.Peer,
 		MsgID:     s.meta.MsgID,
 		UpdatedAt: time.Now().Unix(),
 	}
+	s.mu.Unlock()
+
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("resume: sync part %q: %w", partPath, err)
+	}
 	b, err := json.Marshal(rs)
 	if err != nil {
 		return fmt.Errorf("resume: marshal state: %w", err)
 	}
-	if err := internfs.AtomicWriteFile(s.statePath, b, resumeFilePerm); err != nil {
-		return fmt.Errorf("resume: write state %q: %w", s.statePath, err)
+	if err := internfs.AtomicWriteFile(statePath, b, resumeFilePerm); err != nil {
+		return fmt.Errorf("resume: write state %q: %w", statePath, err)
 	}
-	if err := s.f.Sync(); err != nil {
-		return fmt.Errorf("resume: sync part %q: %w", s.partPath, err)
-	}
+	s.mu.Lock()
 	s.chunksSince = 0
 	s.lastFlush = time.Now()
+	s.mu.Unlock()
 	return nil
 }
 
@@ -434,6 +557,9 @@ func (s *Session) Flush() error {
 // default deletes it).
 // After Commit, Flush becomes a no-op and MarkDone returns an error.
 func (s *Session) Commit() error {
+	defer s.releaseActive()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.committed {
@@ -450,25 +576,26 @@ func (s *Session) Commit() error {
 	}
 	s.f = nil
 
+	targetFinal, err := nextFreeFinalPath(s.finalPath)
+	if err != nil {
+		return err
+	}
+	s.finalPath = targetFinal
+
 	if err := os.Rename(s.partPath, s.finalPath); err != nil {
 		return fmt.Errorf("resume: rename %q → %q: %w", s.partPath, s.finalPath, err)
 	}
+	s.committed = true
 	// rename itself is atomic, but the directory entry needs an fsync to survive a power loss.
 	if df, err := os.Open(filepath.Dir(s.finalPath)); err == nil {
 		_ = df.Sync()
 		_ = df.Close()
 	}
 
-	mtime := s.mtime
-	if mtime.IsZero() {
-		if info, err := os.Stat(s.finalPath); err == nil {
-			mtime = info.ModTime()
-		} else {
-			mtime = time.Now()
+	if !s.mtime.IsZero() {
+		if err := os.Chtimes(s.finalPath, s.mtime, s.mtime); err != nil {
+			return fmt.Errorf("resume: chtimes %q: %w", s.finalPath, err)
 		}
-	}
-	if err := os.Chtimes(s.finalPath, mtime, mtime); err != nil {
-		return fmt.Errorf("resume: chtimes %q: %w", s.finalPath, err)
 	}
 
 	if !s.keepState {
@@ -476,7 +603,6 @@ func (s *Session) Commit() error {
 			return fmt.Errorf("resume: remove state %q: %w", s.statePath, err)
 		}
 	}
-	s.committed = true
 	return nil
 }
 
@@ -484,6 +610,8 @@ func (s *Session) Commit() error {
 // only fsyncs the part file.
 // Session remains usable after Abort (WriteAt/MarkDone/Flush all work until Close).
 func (s *Session) Abort() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.committed || s.f == nil {
@@ -497,6 +625,9 @@ func (s *Session) Abort() error {
 
 // Close closes the part file handle. It returns nil after Commit. Safe to call multiple times.
 func (s *Session) Close() error {
+	defer s.releaseActive()
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.f == nil {
@@ -508,4 +639,38 @@ func (s *Session) Close() error {
 		return fmt.Errorf("resume: close part %q: %w", s.partPath, err)
 	}
 	return nil
+}
+
+func (s *Session) releaseActive() {
+	s.mu.Lock()
+	key := s.activeKey
+	s.activeKey = ""
+	s.mu.Unlock()
+	if key != "" {
+		resolveMu.Lock()
+		delete(activeStatePaths, key)
+		resolveMu.Unlock()
+	}
+}
+
+func nextFreeFinalPath(desired string) (string, error) {
+	if _, err := os.Stat(desired); errors.Is(err, os.ErrNotExist) {
+		return desired, nil
+	} else if err != nil {
+		return "", fmt.Errorf("resume: stat final %q: %w", desired, err)
+	}
+
+	dir := filepath.Dir(desired)
+	file := filepath.Base(desired)
+	ext := filepath.Ext(file)
+	base := strings.TrimSuffix(file, ext)
+	for i := 1; i < 1000; i++ {
+		cand := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
+		if _, err := os.Stat(cand); errors.Is(err, os.ErrNotExist) {
+			return cand, nil
+		} else if err != nil {
+			return "", fmt.Errorf("resume: stat final %q: %w", cand, err)
+		}
+	}
+	return "", fmt.Errorf("resume: all 1000 candidate paths exist for %q", desired)
 }

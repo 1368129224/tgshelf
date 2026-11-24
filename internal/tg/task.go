@@ -50,7 +50,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,7 +82,7 @@ const taskChunkSize int64 = 1 << 20
 // defaultDownloadThreads (4).
 func bestThreads(size int64, max int) int {
 	if max <= 0 {
-		return 1
+		max = defaultDownloadThreads
 	}
 	switch {
 	case size < 1<<20:
@@ -352,7 +351,9 @@ func (r *TaskRunner) Run(ctx context.Context, taskID string, items []TaskItem, p
 
 				res := r.runItem(ctx, taskID, idx, items[idx], chunkDone)
 				res.Index = idx
-				res.RelPath = items[idx].RelPath
+				if res.RelPath == "" {
+					res.RelPath = items[idx].RelPath
+				}
 
 				errMu.Lock()
 				results[idx] = res
@@ -382,18 +383,26 @@ func (r *TaskRunner) Run(ctx context.Context, taskID string, items []TaskItem, p
 	// Task-level state machine: RUNNING -> terminal state (validated explicitly; an illegal
 	// transition is reported as an error).
 	// Priority: any cancellation -> CANCELLED; otherwise any failure -> FAILED; otherwise DONE.
-	if cancelled.Load() {
+	if cancelled.Load() || ctx.Err() != nil {
 		if err := validateTransitionLocal(state.StateRunning, state.StateCancelled); err != nil {
 			return nil, fmt.Errorf("tg: illegal state transition for task %s: %w", taskID, err)
 		}
+		cause := ctx.Err()
+		if cause == nil {
+			cause = context.Canceled
+		}
 		res.State = state.StateCancelled
-		res.Err = fmt.Errorf("tg: task %s canceled: %w", taskID, context.Canceled)
+		res.Err = fmt.Errorf("tg: task %s canceled: %w", taskID, cause)
 	} else if failed.Load() > 0 {
 		if err := validateTransitionLocal(state.StateRunning, state.StateFailed); err != nil {
 			return nil, fmt.Errorf("tg: illegal state transition for task %s: %w", taskID, err)
 		}
 		res.State = state.StateFailed
-		res.Err = fmt.Errorf("tg: task %s partially failed: %d/%d succeeded", taskID, succeeded.Load(), len(items))
+		if firstErr != nil {
+			res.Err = fmt.Errorf("tg: task %s partially failed: %d/%d succeeded: %w", taskID, succeeded.Load(), len(items), firstErr)
+		} else {
+			res.Err = fmt.Errorf("tg: task %s partially failed: %d/%d succeeded", taskID, succeeded.Load(), len(items))
+		}
 	} else {
 		if err := validateTransitionLocal(state.StateRunning, state.StateDone); err != nil {
 			return nil, fmt.Errorf("tg: illegal state transition for task %s: %w", taskID, err)
@@ -416,19 +425,6 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 	res.State = state.StateRunning
 
 	size := it.Item.Size
-	// skip_same: a file with the same name and size already exists -> skip, no getFile at all.
-	if r.cfg.SkipSame && size >= 0 && it.RelPath != "" {
-		final := filepath.Join(r.cfg.RootDir, filepath.FromSlash(it.RelPath))
-		if info, err := os.Stat(final); err == nil && info.Size() == size {
-			r.logger.Info("tg: skip_same hit, skipping download",
-				zap.String("task", taskID), zap.String("path", it.RelPath))
-			res.State = state.StateDone
-			res.Skipped = true
-			res.Bytes = size
-			return res
-		}
-	}
-
 	meta := state.ResumeMeta{
 		Size:      size,
 		ChunkSize: taskChunkSize,
@@ -441,19 +437,19 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		opts = append(opts, state.WithKeepState(true))
 	}
 
-	sess, err := state.Open(r.cfg.RootDir, it.RelPath, meta, opts...)
+	resolvedRel, skipped, sess, err := state.ResolveTarget(r.cfg.RootDir, it.RelPath, meta, r.cfg.SkipSame, opts...)
 	if err != nil {
 		res.Err = fmt.Errorf("tg: open resume session %q: %w", it.RelPath, err)
 		res.State = state.StateFailed
 		return res
 	}
-
-	// Pre-emptive flush: flush once before downloading so that .state definitely exists on
-	// failure/cancellation (the Session writes .state only on Flush; if a chunk failure happens
-	// before the first Flush threshold, without this step there would be no resume state file).
-	if ferr := sess.Flush(); ferr != nil {
-		res.Err = fmt.Errorf("tg: pre-flush .state %q: %w", it.RelPath, ferr)
-		res.State = state.StateFailed
+	res.RelPath = resolvedRel
+	if skipped {
+		r.logger.Info("tg: skip_same hit, skipping download",
+			zap.String("task", taskID), zap.String("path", resolvedRel))
+		res.State = state.StateDone
+		res.Skipped = true
+		res.Bytes = size
 		return res
 	}
 	defer func() { _ = sess.Close() }()
@@ -538,9 +534,15 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		Threads: bestThreads(size, r.cfg.Threads),
 		OnChunk: onChunk,
 		Progress: func(done, tot int64) {
-			prev := prevDone.Swap(done)
-			if delta := done - prev; delta > 0 {
-				chunkDone(delta, it.RelPath)
+			for {
+				prev := prevDone.Load()
+				if done <= prev {
+					return
+				}
+				if prevDone.CompareAndSwap(prev, done) {
+					chunkDone(done-prev, resolvedRel)
+					return
+				}
 			}
 		},
 		Refresh: it.Refresh,
@@ -578,7 +580,7 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		res.Err = derr
 		res.Bytes = plan.CompletedBytes()
 		if cerr != nil {
-			res.Err = fmt.Errorf("%w (closing part file: %v)", res.Err, cerr)
+			res.Err = fmt.Errorf("%w (closing part file: %w)", res.Err, cerr)
 		}
 		return res
 	}
@@ -601,7 +603,7 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		if aerr := sess.Abort(); aerr != nil {
 			r.logger.Warn("tg: Abort failed", zap.String("task", taskID), zap.Error(aerr))
 		}
-		res.Err = fmt.Errorf("tg: commit %q: %w", it.RelPath, err)
+		res.Err = fmt.Errorf("tg: commit %q: %w", resolvedRel, err)
 		res.State = state.StateFailed
 		return res
 	}

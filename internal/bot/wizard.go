@@ -60,21 +60,24 @@ type LoginAPIGetter func(ctx context.Context) (LoginAPI, error)
 
 // LoginState is the login wizard state of a single chat.
 type LoginState struct {
+	UserID        int64
 	Step          LoginStep
 	Phone         string
 	PhoneCodeHash string
 	// ExpiresAt is when the state expires (reset to now+loginStateTTL as each step advances).
 	ExpiresAt time.Time
+	gen       uint64
 }
 
 // loginWizard is the /login wizard: one state per chat plus TTL cleanup.
 // The Bot owns the message in/out orchestration (the wizard only returns reply text and errors),
 // so the struct holds no BotAPI - the dependency direction stays wizard -> abstract interfaces.
 type loginWizard struct {
-	mu     sync.Mutex
-	states map[int64]LoginState
-	getAPI LoginAPIGetter
-	logger *zap.Logger
+	mu      sync.Mutex
+	states  map[int64]LoginState
+	nextGen uint64
+	getAPI  LoginAPIGetter
+	logger  *zap.Logger
 }
 
 // newLoginWizard creates the wizard. With a nil getAPI, Handle reports "login RPC not wired".
@@ -102,14 +105,21 @@ func (w *loginWizard) state(chatID int64) (LoginState, error) {
 	return st, nil
 }
 
-// setState writes the state and refreshes its TTL.
-func (w *loginWizard) setState(chatID int64, st LoginState) {
+// advanceState updates the chat's wizard state only if it still exists with expectedGen.
+// This prevents an in-flight RPC from resurrecting a wizard that was cancelled or restarted.
+func (w *loginWizard) advanceState(chatID int64, expectedGen uint64, st LoginState) bool {
 	if st.ExpiresAt.IsZero() {
 		st.ExpiresAt = time.Now().Add(loginStateTTL)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	cur, ok := w.states[chatID]
+	if !ok || cur.gen != expectedGen {
+		return false
+	}
+	st.gen = expectedGen
 	w.states[chatID] = st
+	return true
 }
 
 // clear deletes the chat's state (successful login / explicit cancel / expiry cleanup).
@@ -129,13 +139,42 @@ func (w *loginWizard) Active(chatID int64) bool {
 	return err == nil
 }
 
-// Start registers a fresh PHONE-step state and returns the first prompt for the user.
-// Sending the message is the caller's (Bot's) job; the wizard only produces text.
-func (w *loginWizard) Start(chatID int64) (string, error) {
-	if w.getAPI == nil {
+// ActiveFor reports whether the chat has an unexpired login wizard owned by userID.
+func (w *loginWizard) ActiveFor(chatID, userID int64) bool {
+	st, err := w.state(chatID)
+	return err == nil && st.UserID == userID
+}
+
+// setGetAPI updates the lazy LoginAPI getter safely (e.g. across MTProto reconnects) without
+// discarding any active login wizard state.
+func (w *loginWizard) setGetAPI(getAPI LoginAPIGetter) {
+	w.mu.Lock()
+	w.getAPI = getAPI
+	w.mu.Unlock()
+}
+
+func (w *loginWizard) currentGetAPI() LoginAPIGetter {
+	w.mu.Lock()
+	fn := w.getAPI
+	w.mu.Unlock()
+	return fn
+}
+
+// Start registers a fresh PHONE-step state owned by userID and returns the first prompt for the
+// user. Sending the message is the caller's (Bot's) job; the wizard only produces text.
+func (w *loginWizard) Start(chatID, userID int64) (string, error) {
+	if w.currentGetAPI() == nil {
 		return "", errors.New("bot: login RPC not wired")
 	}
-	w.setState(chatID, LoginState{Step: LoginStepPhone, ExpiresAt: time.Now().Add(loginStateTTL)})
+	w.mu.Lock()
+	w.nextGen++
+	w.states[chatID] = LoginState{
+		UserID:    userID,
+		Step:      LoginStepPhone,
+		ExpiresAt: time.Now().Add(loginStateTTL),
+		gen:       w.nextGen,
+	}
+	w.mu.Unlock()
 	return "Send your phone number in international format, e.g. +8613800138000:", nil
 }
 
@@ -147,10 +186,11 @@ func (w *loginWizard) Handle(ctx context.Context, chatID int64, text string) (st
 	if err != nil {
 		return "", err
 	}
-	if w.getAPI == nil {
+	getAPI := w.currentGetAPI()
+	if getAPI == nil {
 		return "", errors.New("bot: login RPC not wired")
 	}
-	api, err := w.getAPI(ctx)
+	api, err := getAPI(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -187,7 +227,9 @@ func (w *loginWizard) handlePhone(ctx context.Context, api LoginAPI, chatID int6
 	st.Phone = phone
 	st.PhoneCodeHash = hash
 	st.ExpiresAt = time.Now().Add(loginStateTTL)
-	w.setState(chatID, st)
+	if !w.advanceState(chatID, st.gen, st) {
+		return "", ErrLoginNotStarted
+	}
 	return "Login code sent. Enter the code you received:", nil
 }
 
@@ -205,7 +247,9 @@ func (w *loginWizard) handleCode(ctx context.Context, api LoginAPI, chatID int64
 	if needPassword {
 		st.Step = LoginStepPassword
 		st.ExpiresAt = time.Now().Add(loginStateTTL)
-		w.setState(chatID, st)
+		if !w.advanceState(chatID, st.gen, st) {
+			return "", ErrLoginNotStarted
+		}
 		return "This account has two-step verification enabled. Enter your 2FA password:", nil
 	}
 	w.clear(chatID)

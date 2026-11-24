@@ -321,6 +321,24 @@ func TestOnCancelTaskPermission(t *testing.T) {
 	if !ok || got.State == state.StateCancelled {
 		t.Fatalf("the task must not be cancelled, got %+v", got)
 	}
+
+	// Callback without message context (inaccessible message) must also be rejected for non-admins.
+	noMsgCbq := &models.CallbackQuery{ID: "cb-nomsg", From: models.User{ID: 2}}
+	if err := b.onCancelTask(context.Background(), noMsgCbq, cb); err != nil {
+		t.Fatalf("onCancelTask (no message): %v", err)
+	}
+	if ans := api.lastAnswer(); ans == nil || !strings.Contains(ans.Text, "only cancel your own tasks") {
+		t.Fatalf("cancel without chat context must be rejected for non-admin, got %+v", ans)
+	}
+
+	// Non-admin user cannot retry someone else's task either.
+	retryCb := Callback{Action: ActionRetry, TaskID: "t-1"}
+	if err := b.onRetry(context.Background(), cbq, retryCb); err != nil {
+		t.Fatalf("onRetry: %v", err)
+	}
+	if ans := api.lastAnswer(); ans == nil || !strings.Contains(ans.Text, "only retry your own tasks") {
+		t.Fatalf("retrying across users must be rejected, got %+v", ans)
+	}
 }
 
 // Test 6b: an admin can cancel someone else's task.

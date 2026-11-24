@@ -35,11 +35,13 @@ type Store struct {
 	// Debounced persistence
 	dirty     bool
 	writeFn   writeFunc // injectable, defaults to fs.AtomicWriteFile
+	flushMu   sync.Mutex
 	ticker    *time.Ticker
 	stopCh    chan struct{}
 	doneCh    chan struct{}
 	flushCh   chan chan error // synchronous Flush requests
 	closeOnce sync.Once
+	closeErr  error
 }
 
 // defaultWriteFn writes atomically through internal/fs.AtomicWriteFile.
@@ -50,21 +52,7 @@ func defaultWriteFn(path string, data []byte) error {
 // New creates and initializes a Store and starts the background persistence goroutine.
 // It restores state from the file through Load(); a missing file yields an empty Store.
 func New(path string) (*Store, error) {
-	s := &Store{
-		path:     path,
-		tasks:    make(map[string]*Task),
-		entities: make(map[string]*Entity),
-		writeFn:  defaultWriteFn,
-		ticker:   time.NewTicker(debounceInterval),
-		stopCh:   make(chan struct{}),
-		doneCh:   make(chan struct{}),
-		flushCh:  make(chan chan error, 4),
-	}
-	if err := s.Load(); err != nil {
-		return nil, err
-	}
-	go s.background()
-	return s, nil
+	return newWithWriter(path, defaultWriteFn)
 }
 
 // newWithWriter is for tests only: it injects a custom writeFunc.
@@ -74,7 +62,6 @@ func newWithWriter(path string, wfn writeFunc) (*Store, error) {
 		tasks:    make(map[string]*Task),
 		entities: make(map[string]*Entity),
 		writeFn:  wfn,
-		ticker:   time.NewTicker(debounceInterval),
 		stopCh:   make(chan struct{}),
 		doneCh:   make(chan struct{}),
 		flushCh:  make(chan chan error, 4),
@@ -82,6 +69,7 @@ func newWithWriter(path string, wfn writeFunc) (*Store, error) {
 	if err := s.Load(); err != nil {
 		return nil, err
 	}
+	s.ticker = time.NewTicker(debounceInterval)
 	go s.background()
 	return s, nil
 }
@@ -93,7 +81,7 @@ func (s *Store) background() {
 		select {
 		case <-s.stopCh:
 			// final write before stopping
-			_ = s.flush()
+			s.closeErr = s.flush()
 			return
 		case <-s.ticker.C:
 			s.mu.Lock()
@@ -109,7 +97,11 @@ func (s *Store) background() {
 }
 
 // flush serializes and writes to disk and clears the dirty flag (the caller need not hold the lock).
+// flushMu serializes writes even if callers invoke Flush concurrently after Close.
 func (s *Store) flush() error {
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
 	s.mu.Lock()
 	data := s.snapshot()
 	s.dirty = false
@@ -117,12 +109,28 @@ func (s *Store) flush() error {
 
 	b, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
 		return fmt.Errorf("state.Store: marshal: %w", err)
 	}
 	if err = s.writeFn(s.path, b); err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
 		return fmt.Errorf("state.Store: write %q: %w", s.path, err)
 	}
 	return nil
+}
+
+// cloneTask returns a copy of t with an independent Items slice.
+func cloneTask(t *Task) Task {
+	cp := *t
+	if t.Items != nil {
+		cp.Items = make([]Item, len(t.Items))
+		copy(cp.Items, t.Items)
+	}
+	return cp
 }
 
 // snapshot builds a storeData snapshot while the lock is held (the caller must hold
@@ -131,12 +139,7 @@ func (s *Store) flush() error {
 func (s *Store) snapshot() storeData {
 	tasks := make([]Task, 0, len(s.tasks))
 	for _, t := range s.tasks {
-		cp := *t
-		if t.Items != nil {
-			cp.Items = make([]Item, len(t.Items))
-			copy(cp.Items, t.Items)
-		}
-		tasks = append(tasks, cp)
+		tasks = append(tasks, cloneTask(t))
 	}
 	entities := make([]Entity, 0, len(s.entities))
 	for _, e := range s.entities {
@@ -231,7 +234,7 @@ func (s *Store) Close() error {
 		close(s.stopCh)
 	})
 	<-s.doneCh
-	return nil
+	return s.closeErr
 }
 
 // -------------------------------------------------------------------
@@ -257,7 +260,7 @@ func (s *Store) CreateTask(t Task) error {
 	if _, ok := s.tasks[t.ID]; ok {
 		return fmt.Errorf("state.Store: task %q already exists", t.ID)
 	}
-	cp := t
+	cp := cloneTask(&t)
 	s.tasks[t.ID] = &cp
 	s.markDirty()
 	return nil
@@ -271,12 +274,7 @@ func (s *Store) GetTask(id string) (Task, bool) {
 	if !ok {
 		return Task{}, false
 	}
-	cp := *t
-	if t.Items != nil {
-		cp.Items = make([]Item, len(t.Items))
-		copy(cp.Items, t.Items)
-	}
-	return cp, true
+	return cloneTask(t), true
 }
 
 // UpdateTask updates the task in place with fn (fn runs under the lock and may

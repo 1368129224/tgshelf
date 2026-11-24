@@ -162,6 +162,22 @@ func TestSafeJoin_DeepAncestorSymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestSafeJoin_DanglingSymlinkEscape a dangling symlink pointing to a nonexistent
+// path outside root must be rejected rather than allowed through.
+func TestSafeJoin_DanglingSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outsideTarget := filepath.Join(t.TempDir(), "nonexistent")
+	if err := os.Symlink(outsideTarget, filepath.Join(root, "evil")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := naming.SafeJoin(root, "evil"); !errors.Is(err, naming.ErrOutsideRoot) {
+		t.Errorf("dangling symlink target should be rejected (ErrOutsideRoot), got %v", err)
+	}
+	if _, err := naming.SafeJoin(root, "evil/sub/file.txt"); !errors.Is(err, naming.ErrOutsideRoot) {
+		t.Errorf("path through dangling symlink should be rejected (ErrOutsideRoot), got %v", err)
+	}
+}
+
 // TestSafeJoin_MissingAncestorBelowRoot a nonexistent intermediate directory below
 // the root must not be reported:
 // EvalSymlinks only checks existing ancestors, and an uncreated directory has no

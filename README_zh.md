@@ -16,8 +16,9 @@
 - **快**：1 MiB 分片，每文件并发 `threads` 片，跨多 DC 连接池取数据。
 - **可续传**：分片位图存在 `downloads/<tag>/.parts/`，崩溃、重启、`/cancel` 之后只补缺失分片。
 - **相册 / 私有频道 / 讨论组**：媒体组自动展开，`t.me/c/...` 与 `?comment=<id>` 链接透明解析。
-- **报错可读**：`FLOOD_WAIT`、`FILE_REFERENCE_EXPIRED`、`ENOSPC` 等一律翻译成中文原因，
-  而不是甩一串错误码。
+- **关键词搜索与批量下载**：`/search @channel 关键词` 通过服务端检索频道图片/视频消息（无需扫描全量历史），预览命中数与总体积后选标签即可一键批量下载。
+- **报错可读**：`FLOOD_WAIT`、`FILE_REFERENCE_EXPIRED`、`ENOSPC` 等错误码自动转换为清晰可读的原因与排查建议，
+  而不是甩一串原始错误码。
 - **实时进度**：每个任务一条持续编辑的消息（进度条 + 百分比 + 速度 + 剩余时间），最多每 3 秒编辑一次。
 - **不用盯着**：任务可跨重启恢复（`/status`、`/cancel`、失败重试）、单实例锁、文件名防路径穿越、
   日志自动脱敏。
@@ -66,17 +67,30 @@
 
 ```bash
 docker compose down          # 停止
-docker compose up -d --build # 升级（拉取新代码后重建）
+docker compose up -d --build # 升级（本地源码构建模式：拉取新代码后重建）
 ```
+
+### Docker 镜像说明（GHCR）
+
+官方多架构（`linux/amd64`、`linux/arm64`）distroless 镜像托管于 GitHub Container Registry：
+[`ghcr.io/1368129224/tgshelf`](https://github.com/1368129224/tgshelf/pkgs/container/tgshelf)
+
+| 镜像标签 | 渠道 | 说明 |
+|---|---|---|
+| `ghcr.io/1368129224/tgshelf:latest`<br>`ghcr.io/1368129224/tgshelf:<版本号>` | **正式版（Stable）** | 推送正式版本 Tag 时构建（如 `:2.0.0`、`:v2.0.0`、`:latest`） |
+| `ghcr.io/1368129224/tgshelf:dev`<br>`ghcr.io/1368129224/tgshelf:prerelease`<br>`ghcr.io/1368129224/tgshelf:dev-<sha>` | **预发布（Pre-release）** | `dev` 分支每次提交后自动构建推送 |
+
+`docker-compose.yml.example` 默认从本地源码构建；若希望直接拉取预构建镜像，可在 `docker-compose.yml` 中注释掉 `build:` 并启用对应的 `image:` 行，后续通过 `docker compose pull && docker compose up -d` 升级。
 
 ## 命令
 
 | 命令 | 谁可用 | 作用 |
 |---|---|---|
 | `/start`、`/help` | 白名单用户 | 用法说明 |
+| `/search <频道> <关键词>` | 白名单用户 | 按关键词检索频道内的图片/视频消息（服务端 `messages.search`），预览命中数量与总大小后选择标签批量下载 |
 | `/status` | 白名单用户 | 排队中与正在下载的任务（管理员能看到所有任务） |
-| `/cancel <ID>` / `/cancel all` | 白名单用户 | 取消任务；登录向导进行中时用来退出向导 |
-| `/show_config`（别名 `/config`） | 白名单用户 | 查看当前配置（敏感项已脱敏） |
+| `/cancel <ID>` / `/cancel all`（或 `/cancel_all`） | 白名单用户 | 取消任务；登录向导进行中时用来退出向导 |
+| `/show_config`（别名 `/config`） | **管理员** | 查看当前配置（敏感项已脱敏） |
 | `/sync` | **管理员** | 刷新会话 / `access_hash` 缓存（私有频道必须） |
 | `/login` | **管理员** | 手机号 → 验证码 → 2FA 登录向导 |
 | `/logout` | **管理员** | 删除 session 文件（需重启才真正未登录；设备还要在 Telegram 里手动终止） |
@@ -117,6 +131,8 @@ cp tgshelf_config.toml.example tgshelf_config.toml # 然后改 bot_token / admin
 | `TG_API_ID` / `TG_API_HASH` | `[telegram] api_id` / `api_hash`（必须成对；仅在 `identity = "custom"` 时生效） |
 
 每个配置项的含义、默认值与约束：[docs/configuration.md](docs/configuration.md)。
+
+**自定义文件名（保留原始文件名）**：`[download] template` 默认拼接 `<频道ID>_<消息ID>_<原文件名>`；若希望直接保留原始文件名，可在配置中设为 `template = '{{ filenamify .FileName }}'`（磁盘上遇到同名但大小不同的已有文件会自动避让为 `文件名 (1).ext`；无文件名属性的音乐自动回退为 `歌手 - 歌名.ext`；Telegram 普通压缩图片因服务端不保存原文件名，固定为 `<PhotoID>.jpg`）。
 
 ## 目录与文件
 
