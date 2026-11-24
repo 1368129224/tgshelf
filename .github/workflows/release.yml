@@ -1,0 +1,128 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+      - "[0-9]*.[0-9]*.[0-9]*"
+      - "!*-*"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run verification checks
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Build multi-arch release binaries
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/tgshelf-linux-amd64 ./cmd/tgshelf
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w' -o dist/tgshelf-linux-arm64 ./cmd/tgshelf
+          (cd dist && sha256sum tgshelf-linux-amd64 tgshelf-linux-arm64 > SHA256SUMS)
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=v{{version}},enable=${{ !startsWith(github.ref_name, 'v') }}
+            type=ref,event=tag
+            type=raw,value=latest
+            type=sha
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push formal multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prepare Draft GitHub Release (manual publish)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          IMAGE_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          IMAGE_LOWER=$(echo "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
+          VER="${TAG#v}"
+
+          {
+            echo "### Docker Images"
+            echo "\`\`\`bash"
+            echo "docker pull ${IMAGE_LOWER}:${VER}"
+            echo "docker pull ${IMAGE_LOWER}:latest"
+            echo "\`\`\`"
+            echo ""
+            echo "### Binary Checksums (SHA-256)"
+            echo "\`\`\`text"
+            cat dist/SHA256SUMS
+            echo "\`\`\`"
+          } > dist/DOCKER_NOTES.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release or draft for ${TAG} already exists; uploading binary assets without publishing."
+            gh release upload "$TAG" \
+              dist/tgshelf-linux-amd64 \
+              dist/tgshelf-linux-arm64 \
+              dist/SHA256SUMS \
+              --clobber
+          else
+            PREV_TAG=$(git tag -l --sort=-version:refname | grep -E '^(v)?[0-9]+\.[0-9]+\.[0-9]+$' | grep -Fxv "$TAG" | head -n 1 || true)
+            START_TAG_ARGS=()
+            if [ -n "$PREV_TAG" ]; then
+              START_TAG_ARGS=(--notes-start-tag "$PREV_TAG")
+            fi
+
+            gh release create "$TAG" \
+              dist/tgshelf-linux-amd64 \
+              dist/tgshelf-linux-arm64 \
+              dist/SHA256SUMS \
+              --draft \
+              --verify-tag \
+              --title "tgshelf ${TAG}" \
+              --generate-notes \
+              "${START_TAG_ARGS[@]}" \
+              --notes "$(cat dist/DOCKER_NOTES.md)"
+          fi
