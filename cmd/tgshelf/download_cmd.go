@@ -745,9 +745,15 @@ func (e *dlEngine) runOneFile(ctx context.Context, rpc dlGetFile, it dlItem, ref
 			}
 		},
 		Progress: func(done, tot int64) {
-			prev := prevDone.Swap(done)
-			if delta := done - prev; delta > 0 {
-				onDelta(delta)
+			for {
+				prev := prevDone.Load()
+				if done <= prev {
+					return
+				}
+				if prevDone.CompareAndSwap(prev, done) {
+					onDelta(done - prev)
+					return
+				}
 			}
 		},
 		Refresh: refresh,

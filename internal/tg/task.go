@@ -538,9 +538,15 @@ func (r *TaskRunner) runItem(ctx context.Context, taskID string, idx int, it Tas
 		Threads: bestThreads(size, r.cfg.Threads),
 		OnChunk: onChunk,
 		Progress: func(done, tot int64) {
-			prev := prevDone.Swap(done)
-			if delta := done - prev; delta > 0 {
-				chunkDone(delta, it.RelPath)
+			for {
+				prev := prevDone.Load()
+				if done <= prev {
+					return
+				}
+				if prevDone.CompareAndSwap(prev, done) {
+					chunkDone(done-prev, it.RelPath)
+					return
+				}
 			}
 		},
 		Refresh: it.Refresh,
