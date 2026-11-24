@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] — 2026-11-24
+
+### Added
+
+- **Channel keyword search (`/search`)** — server-side photo/video search (`messages.search`) with hit preview, total size summary, tag-based batch download, and per-item `FILE_REFERENCE` refresh for long-running batches.
+- **Collision-safe custom filenames** — existing files with the same name and a different size are never overwritten (`name (1).ext` automatic deduplication with full resume and `skip_same` support); untitled audio tracks fall back to `Performer - Title.<ext>`.
+- **CI/CD pipelines** — automated `CI` gate protecting `main`, rolling `dev` pre-release builds, and tag-driven multi-arch GHCR & release builds.
+
+### Fixed & Improved
+
+- Enforced admin-only access on `/show_config` (`/config`), per-chat task ownership on cancel/retry, and added the `/cancel_all` command alias.
+- Preserved leading/trailing spaces in 2FA passwords, prevented stale login wizard state resurrection, surfaced `FLOOD_WAIT` immediately during login, and acquired the session lock before rotating old sessions in `-login`.
+- Fixed takeout `FileMaxSize` MiB-to-bytes conversion and `invokeWithTakeout` wrapping on `finishTakeoutSession`; closed `dcpool` on each reconnect; added TLS handshakes for `https://` proxies.
+- Enforced `FILE_REFERENCE` refresh cooldowns, `fsync`ed `.part` files before persisting `.state` bitmaps, rejected escaping/dangling symlinks in `SafeJoin`, and fixed `-config` > `TGSHELF_CONFIG` CLI precedence.
+
 ## [2.0.0] — 2026-11-10
 
 First stable release: one static Go binary that talks MTProto directly and files
@@ -61,4 +76,5 @@ Telegram media into per-tag folders.
 - Optional allowlist (`allowed_user_ids`) and a separate admin list
   (`admin_user_ids`) for account-level management commands.
 
+[2.1.0]: https://github.com/1368129224/tgshelf/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/1368129224/tgshelf/releases/tag/v2.0.0
