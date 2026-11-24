@@ -74,9 +74,10 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 		case "search":
 			return b.onSearchCommand(ctx, msg)
 		case "cancel":
-			// /cancel doubles as "leave the login wizard": while a wizard is running that wins,
-			// otherwise it falls through to task cancellation (admin.go's cmdCancel).
-			if b.login.Active(msg.Chat.ID) {
+			// /cancel doubles as "leave the login wizard": while a wizard is running for this
+			// admin user that wins, otherwise it falls through to task cancellation (cmdCancel).
+			uid := senderID(msg)
+			if isAdmin(b.cfg, uid) && b.login.ActiveFor(msg.Chat.ID, uid) {
 				b.login.clear(msg.Chat.ID)
 				_, err := b.sendText(ctx, msg.Chat.ID, "Login wizard closed (the existing session was not deleted).")
 				return err
@@ -87,10 +88,9 @@ func (b *Bot) handleText(ctx context.Context, msg *models.Message) error {
 		}
 	}
 
-	// The login wizard comes first: while it runs, ordinary text is a phone number / login code /
-	// 2FA password and must not be treated as a link (in real acceptance testing a phone number
-	// ended up in handleLinks exactly this way).
-	if b.login.Active(msg.Chat.ID) {
+	// The login wizard comes first: while it runs for this admin user, ordinary text is a phone
+	// number / login code / 2FA password and must not be treated as a link.
+	if uid := senderID(msg); isAdmin(b.cfg, uid) && b.login.ActiveFor(msg.Chat.ID, uid) {
 		return b.handleLoginInput(ctx, msg)
 	}
 
@@ -509,10 +509,9 @@ func (b *Bot) onCancelTask(ctx context.Context, cbq *models.CallbackQuery, cb Ca
 	}
 
 	// Permissions: you can only cancel tasks in your own chat; admins can cancel anyone's.
-	if chatID, _, hasChat := callbackChat(cbq); hasChat {
-		if task.ChatID != chatID && !isAdmin(b.cfg, cbq.From.ID) {
-			return b.answerCallback(ctx, cbq, "You can only cancel your own tasks", true)
-		}
+	chatID, _, hasChat := callbackChat(cbq)
+	if !isAdmin(b.cfg, cbq.From.ID) && (!hasChat || task.ChatID != chatID) {
+		return b.answerCallback(ctx, cbq, "You can only cancel your own tasks", true)
 	}
 
 	b.logger.Info("user requested to cancel a download task",
@@ -547,6 +546,11 @@ func (b *Bot) onRetry(ctx context.Context, cbq *models.CallbackQuery, cb Callbac
 	old, ok := b.tasks.Get(cb.TaskID)
 	if !ok {
 		return b.answerCallback(ctx, cbq, "The original task has expired, send the link again", true)
+	}
+	// Permissions: you can only retry tasks in your own chat; admins can retry anyone's.
+	chatID, _, hasChat := callbackChat(cbq)
+	if !isAdmin(b.cfg, cbq.From.ID) && (!hasChat || old.ChatID != chatID) {
+		return b.answerCallback(ctx, cbq, "You can only retry your own tasks", true)
 	}
 	if b.hasActiveTask(old.ChatID, old.Link, old.Tag) {
 		return b.answerCallback(ctx, cbq, "This link is already downloading", true)

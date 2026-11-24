@@ -60,6 +60,7 @@ type LoginAPIGetter func(ctx context.Context) (LoginAPI, error)
 
 // LoginState is the login wizard state of a single chat.
 type LoginState struct {
+	UserID        int64
 	Step          LoginStep
 	Phone         string
 	PhoneCodeHash string
@@ -129,13 +130,23 @@ func (w *loginWizard) Active(chatID int64) bool {
 	return err == nil
 }
 
-// Start registers a fresh PHONE-step state and returns the first prompt for the user.
-// Sending the message is the caller's (Bot's) job; the wizard only produces text.
-func (w *loginWizard) Start(chatID int64) (string, error) {
+// ActiveFor reports whether the chat has an unexpired login wizard owned by userID.
+func (w *loginWizard) ActiveFor(chatID, userID int64) bool {
+	st, err := w.state(chatID)
+	return err == nil && st.UserID == userID
+}
+
+// Start registers a fresh PHONE-step state owned by userID and returns the first prompt for the
+// user. Sending the message is the caller's (Bot's) job; the wizard only produces text.
+func (w *loginWizard) Start(chatID, userID int64) (string, error) {
 	if w.getAPI == nil {
 		return "", errors.New("bot: login RPC not wired")
 	}
-	w.setState(chatID, LoginState{Step: LoginStepPhone, ExpiresAt: time.Now().Add(loginStateTTL)})
+	w.setState(chatID, LoginState{
+		UserID:    userID,
+		Step:      LoginStepPhone,
+		ExpiresAt: time.Now().Add(loginStateTTL),
+	})
 	return "Send your phone number in international format, e.g. +8613800138000:", nil
 }
 

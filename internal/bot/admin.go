@@ -223,9 +223,13 @@ func skippedText(n int) string {
 	return fmt.Sprintf(", %d already finished and skipped", n)
 }
 
-// cmdShowConfig prints a config snapshot. It never includes bot_token / api_hash / session
-// contents.
+// cmdShowConfig prints a config snapshot (admins only). It never includes bot_token / api_hash /
+// session contents.
 func (b *Bot) cmdShowConfig(ctx context.Context, msg *models.Message) error {
+	if !isAdmin(b.cfg, senderID(msg)) {
+		_, err := b.sendText(ctx, msg.Chat.ID, "Not allowed: /show_config is admin only.")
+		return err
+	}
 	_, err := b.sendText(ctx, msg.Chat.ID, b.showConfigText(ctx))
 	return err
 }
@@ -336,7 +340,7 @@ func (b *Bot) cmdLoginLogout(ctx context.Context, msg *models.Message, cmd strin
 
 	// /login: actually enter the wizard (before this it only replied with a static text and the
 	// phone number was treated as an ordinary message).
-	reply, err := b.login.Start(msg.Chat.ID)
+	reply, err := b.login.Start(msg.Chat.ID, senderID(msg))
 	if err != nil {
 		_, serr := b.sendText(ctx, msg.Chat.ID, b.translate(err))
 		return serr
