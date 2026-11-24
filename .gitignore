@@ -31,6 +31,7 @@ docker-compose.yml
 # Local scratch space (backups, ad-hoc test output)
 backup/
 .acceptance/
+code_review.md
 
 # IDE & editors
 .vscode/
