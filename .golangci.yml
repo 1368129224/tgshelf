@@ -8,6 +8,8 @@ linters:
   default: none
   enable:
     - errcheck
+    - errorlint
+    - gosec
     - govet
     - ineffassign
     - staticcheck

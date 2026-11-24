@@ -1,5 +1,5 @@
 # Go environment variables
-GO         := /usr/local/go/bin/go
+GO         ?= go
 GOPATH     := $(CURDIR)/.gohome
 GOMODCACHE := $(GOPATH)/pkg/mod
 GOCACHE    := $(GOPATH)/cache
@@ -16,9 +16,9 @@ CMD_PATH   := ./cmd/tgshelf
 build:
 	$(GO) build -o $(BINARY) $(CMD_PATH)
 
-## test: run all unit tests
+## test: run all unit tests with race detector
 test:
-	$(GO) test ./...
+	$(GO) test -race ./...
 
 ## vet: run static analysis
 vet:
@@ -38,7 +38,7 @@ run:
 
 ## docker: build the Docker image
 docker:
-	docker build -t tgshelf .
+	docker build -f deploy/Dockerfile -t tgshelf .
 
 ## fmt: format all Go code
 fmt:
